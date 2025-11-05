@@ -1,4 +1,5 @@
-# <img width="50" height="100" alt="Copy of Untitled Design" src="https://github.com/user-attachments/assets/3693a100-a730-443c-ab6e-dbfabade7867" /> NEUROINDEX
+# <img width="50" height="100" alt="logo_ni" src="https://github.com/user-attachments/assets/fd7569f3-814b-4021-96c0-6fc05c0c8f17" />
+NEUROINDEX
 
 ## Operational Overview
 You’ll start the RESP server (port 6381), import 1M records via the Python client, create a snapshot from the CLI, then bring up the HTTP server (port 8080) pointing to the same persistence directory. Here’s the step-by-step.
