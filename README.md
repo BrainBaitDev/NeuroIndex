@@ -67,7 +67,7 @@ curl -s http://127.0.0.1:8080/api/v1/health | jq
 curl -s http://127.0.0.1:8080/api/v1/stats | jq
 ```
 
-### GET singolo
+### GET single key
 ```
 curl -s http://127.0.0.1:8080/api/v1/records/account:0050000 | jq
 ```
