@@ -42,8 +42,28 @@ In a fourth terminal:
 
 Launch the process:
 ./target/release/neuroindex-http --port 8080 --shards 16 --capacity 65536 --log-level info --persistence-dir ./data
-Verify the port is up:
 
+Verify the port is up:
 lsof -i :8080 or curl http://127.0.0.1:8080/health (if a health endpoint is available)
 
 
+## QUERY REST API FOR TEST
+==============================================
+
+### Health check
+curl -s http://127.0.0.1:8080/api/v1/health | jq
+
+### Stats
+curl -s http://127.0.0.1:8080/api/v1/stats | jq
+
+### GET singolo
+curl -s http://127.0.0.1:8080/api/v1/records/account:0050000 | jq
+
+### Range query
+curl -s "http://127.0.0.1:8080/api/v1/records/range?start=account:0000000&end=account:0100000&limit=50" | jq
+
+### Count aggregation
+curl -s "http://127.0.0.1:8080/api/v1/aggregations/count?start=account:0000000&end=account:0100000" | jq
+
+### Bulk insert
+curl -X POST http://127.0.0.1:8080/api/v1/records/bulk -H "Content-Type: application/json" -d '{"records":[{"key":"demo:001","value":{"name":"Test User 1","active":true}},{"key":"demo:002","value":{"name":"Test User 2","active":false}}]}' | jq
