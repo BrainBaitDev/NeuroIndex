@@ -46,6 +46,10 @@ Launch the process:
 Verify the port is up:
 lsof -i :8080 or curl http://127.0.0.1:8080/health (if a health endpoint is available)
 
+## CHECK FOR MEMORY USAGE
+==============================================
+ps -C neuroindex-http -o rss= | awk '{sum+=$1} END {printf "RAM: %.2f MB\n", sum/1024}'
+
 
 ## QUERY REST API FOR TEST
 ==============================================
@@ -61,9 +65,36 @@ curl -s http://127.0.0.1:8080/api/v1/records/account:0050000 | jq
 
 ### Range query
 curl -s "http://127.0.0.1:8080/api/v1/records/range?start=account:0000000&end=account:0100000&limit=50" | jq
+curl -s "http://172.16.99.30:8080/api/v1/records/range?start=account:0900000&end=account:0910000&ts=_701" | jq #range query where ts key contain 701
 
 ### Count aggregation
 curl -s "http://127.0.0.1:8080/api/v1/aggregations/count?start=account:0000000&end=account:0100000" | jq
 
 ### Bulk insert
 curl -X POST http://127.0.0.1:8080/api/v1/records/bulk -H "Content-Type: application/json" -d '{"records":[{"key":"demo:001","value":{"name":"Test User 1","active":true}},{"key":"demo:002","value":{"name":"Test User 2","active":false}}]}' | jq
+
+
+## PARAMETERS REST API
+==============================================
+start -> start key
+end -> end key
+limit -> max result number of elements
+
+## CLI COMMANDS
+==============================================
+| Command   | Description | Example |
+|---------|-------------|---------|
+| **PING** | Test connection | `PING` → `PONG` |
+| **ECHO** | Echo message | `ECHO "hello"` → `"hello"` |
+| **SET** | Set key-value | `SET key value` → `OK` |
+| **GET** | Get value | `GET key` → `value` |
+| **MSET** | Set multiple | `MSET k1 v1 k2 v2` → `OK` |
+| **MGET** | Get multiple | `MGET k1 k2` → `[v1, v2]` |
+| **DEL** | Delete keys | `DEL k1 k2` → `2` (count) |
+| **EXISTS** | Check existence | `EXISTS k1 k2` → `2` (count) |
+| **KEYS** | List all keys | `KEYS *` → `[k1, k2, ...]` |
+| **DBSIZE** | Database size | `DBSIZE` → `100` |
+| **INFO** | Server info | `INFO` → `"...stats..."` |
+| **QUIT** | Close connection | `QUIT` → `OK` |
+
+
