@@ -1,0 +1,17 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cuckoo = { path = "../cuckoo" }
+ttree = { path = "../ttree" }
+ahash = { workspace = true }
+parking_lot = { workspace = true }
+arena = { path = "../arena" }
+hopscotch = { path = "../hopscotch" }
+wal = { path = "../wal" }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

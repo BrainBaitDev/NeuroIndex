@@ -1,0 +1,13 @@
+[package]
+name = "wal"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+bincode = { workspace = true }
+crc32fast = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

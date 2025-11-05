@@ -1,0 +1,10 @@
+[package]
+name = "ttree"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

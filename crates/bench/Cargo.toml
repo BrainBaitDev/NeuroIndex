@@ -1,0 +1,21 @@
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+criterion = { workspace = true }
+engine = { path = "../engine" }
+rand = { workspace = true }
+
+[[bench]]
+name = "kv"
+harness = false
+
+[[bench]]
+name = "ycsb"
+harness = false
+
+[[bench]]
+name = "phase8_perf"
+harness = false
