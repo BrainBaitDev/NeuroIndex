@@ -90,9 +90,6 @@ All clients implement the RESP (REdis Serialization Protocol) for compatibility 
 - Wire protocol tools (netcat, telnet)
 - Custom implementations
 
-## Documentation
-
-See [CLIENT_USAGE.md](../CLIENT_USAGE.md) for complete usage guide with examples.
 
 ## License
 
