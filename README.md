@@ -72,9 +72,10 @@ curl -s "http://127.0.0.1:8080/api/v1/aggregations/count?start=account:0000000&e
 curl -X POST http://127.0.0.1:8080/api/v1/records/bulk -H "Content-Type: application/json" -d '{"records":[{"key":"demo:001","value":{"name":"Test User 1","active":true}},{"key":"demo:002","value":{"name":"Test User 2","active":false}}]}' | jq
 
 ## PARAMETERS REST API
-start -> start key
-end -> end key
-limit -> max result number of elements
+| Command   | Description |
+| **start** | start key |
+| **end** | end key |
+| **limit** | max result number of elements |
 
 ## CLI COMMANDS
 | Command   | Description | Example |
