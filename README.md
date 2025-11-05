@@ -1,10 +1,4 @@
-    _   __                      ____          __
-   / | / /__  __  ___________  /  _/___  ____/ /__  _  __
-  /  |/ / _ \/ / / / ___/ __ \ / // __ \/ __  / _ \| |/_/
- / /|  /  __/ /_/ / /  / /_/ // // / / / /_/ /  __/>  <
-/_/ |_/\___/\__,_/_/   \____/___/_/ /_/\__,_/\___/_/|_|
-
-
+# NEUROINDEX
 ## Operational Overview
 You’ll start the RESP server (port 6381), import 1M records via the Python client, create a snapshot from the CLI, then bring up the HTTP server (port 8080) pointing to the same persistence directory. Here’s the step-by-step.
 
