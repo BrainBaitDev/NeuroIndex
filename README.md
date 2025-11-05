@@ -13,24 +13,33 @@ Persistence directory available: ./data
 
 ## 1. Start NeuroIndex RESP Server
 In a first terminal start the server:
+```
 ./target/release/neuroindex-resp-server --port 6381 --shards 16 --capacity 65536 --log-level info --persistence-dir ./data
+```
 
 Verify the port is listening (optional):
+```
 lsof -i :6381 or ss -lntp | grep 6381
+```
 
 ## 2. Load 1M records via Python client
 In a second terminal run the batch import (5k per batch):
+```
 python3 clients/python/insert_1m_resp.py --host 0.0.0.0 --port 6381 --total 1000000 --batch-size 5000 --prefix account
+```
 Tips:
 If you hit timeouts, lower --batch-size (e.g., 2000).
 Watch the server terminal for backpressure or memory warnings.
 
 ## 3. Take a snapshot with neuroindex-cli
 Start the CLI:
+```
 ./target/release/neuroindex-cli --host 0.0.0.0 --port 6381
-
+```
 From the CLI prompt, run:
+```
 snapshot
+```
 
 Notes:
 Wait for the completion message before proceeding.
@@ -38,17 +47,22 @@ The snapshot is written under ./data (as configured by the RESP server).
 If writes are ongoing, the snapshot reflects the state at the command time
 
 ## 4. Start NeuroIndex HTTP Server
-In a fourth terminal:
+In a third terminal:
 
 Launch the process:
+```
 ./target/release/neuroindex-http --port 8080 --shards 16 --capacity 65536 --log-level info --persistence-dir ./data
+```
 
 Verify the port is up:
+```
 lsof -i :8080 or curl http://127.0.0.1:8080/health (if a health endpoint is available)
+```
 
 ## CHECK FOR MEMORY USAGE
+```
 ps -C neuroindex-http -o rss= | awk '{sum+=$1} END {printf "RAM: %.2f MB\n", sum/1024}'
-
+```
 
 ## QUERY REST API FOR TEST
 
@@ -73,6 +87,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/records/bulk -H "Content-Type: applica
 
 ## PARAMETERS REST API
 | Command   | Description |
+|---------|-------------|
 | **start** | start key |
 | **end** | end key |
 | **limit** | max result number of elements |
