@@ -58,7 +58,7 @@ In a third terminal launch the process:
 
 Verify the port is up:
 ```
-lsof -i :8080 or curl http://127.0.0.1:8080/health (if a health endpoint is available)
+lsof -i :8080 or curl http://127.0.0.1:8080/api/v1/health (if a health endpoint is available)
 ```
 
 ### CHECK FOR MEMORY USAGE
