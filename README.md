@@ -39,9 +39,7 @@ The snapshot is written under ./data (as configured by the RESP server).
 If writes are ongoing, the snapshot reflects the state at the command time
 
 ## 4. Start NeuroIndex HTTP Server
-In a third terminal:
-
-Launch the process:
+In a third terminal launch the process:
 ```
 ./target/release/neuroindex-http --port 8080 --shards 16 --capacity 65536 --log-level info --persistence-dir ./data
 ```
