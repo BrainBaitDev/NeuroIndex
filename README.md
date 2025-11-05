@@ -3,6 +3,11 @@
 ## Operational Overview
 You’ll start the RESP server (port 6381), import 1M records via the Python client, create a snapshot from the CLI, then bring up the HTTP server (port 8080) pointing to the same persistence directory. Here’s the step-by-step.
 
+## FLASH START 
+execute demo.sh
+
+or
+
 ## 1. Compile your build
 ```
 cargo build --release
