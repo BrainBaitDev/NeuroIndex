@@ -85,7 +85,7 @@ curl -s http://127.0.0.1:8080/api/v1/records/account:0050000 | jq
 curl -s "http://127.0.0.1:8080/api/v1/records/range?start=account:0000000&end=account:0100000&limit=50" | jq
 ```
 ```
-curl -s "http://172.16.99.30:8080/api/v1/records/range?start=account:0900000&end=account:0910000&ts=_701" | jq #range query where ts key contain 701
+curl -s "http://127.0.0.1:8080/api/v1/records/range?start=account:0900000&end=account:0910000&ts=_701" | jq #range query where ts key contain 701
 ```
 
 #### Count aggregation
