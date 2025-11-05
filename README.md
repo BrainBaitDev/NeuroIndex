@@ -3,14 +3,6 @@
 ## Operational Overview
 You’ll start the RESP server (port 6381), import 1M records via the Python client, create a snapshot from the CLI, then bring up the HTTP server (port 8080) pointing to the same persistence directory. Here’s the step-by-step.
 
-## Quick prerequisites
-Ensure these binaries exist and are executable:
-./target/release/neuroindex-resp-server
-./target/release/neuroindex-cli
-./target/release/neuroindex-http
-Python 3 with dependencies for clients/python/insert_1m_resp.py
-Persistence directory available: ./data
-
 ## 1. Start NeuroIndex RESP Server
 In a first terminal start the server:
 ```
