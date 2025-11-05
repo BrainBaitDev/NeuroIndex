@@ -11,21 +11,21 @@ Ensure these binaries exist and are executable:
 Python 3 with dependencies for clients/python/insert_1m_resp.py
 Persistence directory available: ./data
 
-## Start NeuroIndex RESP Server
+## 1. Start NeuroIndex RESP Server
 In a first terminal start the server:
 ./target/release/neuroindex-resp-server --port 6381 --shards 16 --capacity 65536 --log-level info --persistence-dir ./data
 
 Verify the port is listening (optional):
 lsof -i :6381 or ss -lntp | grep 6381
 
-## Load 1M records via Python client
+## 2. Load 1M records via Python client
 In a second terminal run the batch import (5k per batch):
 python3 clients/python/insert_1m_resp.py --host 0.0.0.0 --port 6381 --total 1000000 --batch-size 5000 --prefix account
 Tips:
 If you hit timeouts, lower --batch-size (e.g., 2000).
 Watch the server terminal for backpressure or memory warnings.
 
-## Take a snapshot with neuroindex-cli
+## 3. Take a snapshot with neuroindex-cli
 Start the CLI:
 ./target/release/neuroindex-cli --host 0.0.0.0 --port 6381
 
@@ -37,7 +37,7 @@ Wait for the completion message before proceeding.
 The snapshot is written under ./data (as configured by the RESP server).
 If writes are ongoing, the snapshot reflects the state at the command time
 
-## Start NeuroIndex HTTP Server
+## 4. Start NeuroIndex HTTP Server
 In a fourth terminal:
 
 Launch the process:
