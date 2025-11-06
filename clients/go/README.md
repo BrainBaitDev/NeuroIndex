@@ -171,11 +171,3 @@ func (p *ClientPool) Put(client *NeuroIndexClient) {
     p.clients <- client
 }
 ```
-
-## License
-
-Apache 2.0 - Same as NeuroIndex core
-
----
-
-**NeuroIndex** - Powered with Love and Rust by Antonio & Alessia ❤️
