@@ -1,6 +1,32 @@
-# <img width="50" height="100" alt="logo_ni" src="https://github.com/user-attachments/assets/e86b647b-0577-4a7c-b913-cd621b3cae37" /> NEUROINDEX
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/e86b647b-0577-4a7c-b913-cd621b3cae37" alt="Sublime's custom image"/>
+</p> 
 
-## Operational Overview
+# NEUROINDEX
+## Why NeuroIndex?
+NeuroIndex is an in-memory database engine written in Rust, designed to deliver extreme performance (<200ns per GET) and multi-platform compatibility (Rust API, REST, Redis protocol, gRPC).
+
+## Key Features
+<table align="center">
+    <tr>
+        <td align="center"> <b>Engine model:</b><br> Sharded multi-core engine with T-Tree + Cuckoo + Hopscotch</td>
+        <td align="center"><b>Threading:</b><br> Native parallelism with lock-free shards that scales across all cores without the need for multiple clusters</td>
+    </tr>
+    <tr>
+        <td align="center"><b>Data Model and Query Layer:</b><br> Native support for JSON and an SQL-like engine that allows aggregations, range queries, and joins directly on the engine</td>
+        <td align="center"><b>Client multi-protocollo:</b><br> Native support for RESP, REST, gRPC with SDKs for Python, Node, Go, C#, Java</td>
+    </tr>
+      <tr>
+        <td align="center"><b>Scalability:</b><br>  Scalability up to the number of cores.
+                                              <br>  Startup footprint < 10MB (embedded engine).
+                                              <br>  WAL persistence + hybrid snapshot (similar to LMDB).</td>
+        <td align="center"><b>Performance:</b><br>  Integrated monitoring with PerfCounters and real-time metrics.
+                                              <br>  Auto-Tuning module for automatic optimisation.
+                                              <br>  Competitive performance: GET p50 < 200 ns/op and Range 10K ~600–900 ns.</td>
+    </tr>
+</table>
+
+## Operational DEMO Overview
 You’ll start the RESP server (port 6381), import 1M records via the Python client, create a snapshot from the CLI, then bring up the HTTP server (port 8080) pointing to the same persistence directory. Here’s the step-by-step.
 
 ## Falsh Demo 
