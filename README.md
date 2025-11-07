@@ -89,12 +89,12 @@ Verify the port is up:
 lsof -i :8080 or curl http://127.0.0.1:8080/api/v1/health (if a health endpoint is available)
 ```
 
-### CHECK FOR MEMORY USAGE
+## CHECK FOR MEMORY USAGE
 ```
 ps -C neuroindex-http -o rss= | awk '{sum+=$1} END {printf "RAM: %.2f MB\n", sum/1024}'
 ```
 
-### QUERY REST API FOR TEST
+## QUERY REST API FOR TEST
 
 #### Health check
 ```
@@ -114,8 +114,10 @@ curl -s http://127.0.0.1:8080/api/v1/records/account:0050000 | jq
 ```
 curl -s "http://127.0.0.1:8080/api/v1/records/range?start=account:0000000&end=account:0100000&limit=50" | jq
 ```
+
+range query where ts key contain 701
 ```
-curl -s "http://127.0.0.1:8080/api/v1/records/range?start=account:0900000&end=account:0910000&ts=_701" | jq #range query where ts key contain 701
+curl -s "http://127.0.0.1:8080/api/v1/records/range?start=account:0900000&end=account:0910000&ts=_701" | jq range query where ts key contain 701
 ```
 
 #### Count aggregation
@@ -128,14 +130,14 @@ curl -s "http://127.0.0.1:8080/api/v1/aggregations/count?start=account:0000000&e
 curl -X POST http://127.0.0.1:8080/api/v1/records/bulk -H "Content-Type: application/json" -d '{"records":[{"key":"demo:001","value":{"name":"Test User 1","active":true}},{"key":"demo:002","value":{"name":"Test User 2","active":false}}]}' | jq
 ```
 
-### PARAMETERS REST API
+## PARAMETERS REST API
 | Command   | Description |
 |---------|-------------|
 | **start** | start key |
 | **end** | end key |
 | **limit** | max result number of elements |
 
-### CLI COMMANDS
+## CLI COMMANDS
 | Command   | Description | Example |
 |---------|-------------|---------|
 | **PING** | Test connection | `PING` → `PONG` |
