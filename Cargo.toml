@@ -1,7 +1,9 @@
 [workspace]
 members = [
+    "neuroindex",
     "crates/engine",
     "crates/cuckoo",
+    "crates/cuckoofilter",
     "crates/utils",
     "crates/bench",
     "crates/ttree",
@@ -12,6 +14,7 @@ members = [
     "crates/resp-server",
     "crates/resp-cli",
     "crates/http-server",
+    "crates/art",
 ]
 resolver = "2"
 

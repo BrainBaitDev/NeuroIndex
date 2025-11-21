@@ -1,0 +1,48 @@
+[package]
+name = "neuroindex"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "High-performance in-memory database with persistence"
+homepage = "https://github.com/BrainBaitDev/NeuroIndex"
+repository = "https://github.com/BrainBaitDev/NeuroIndex"
+
+[[bin]]
+name = "neuroindex-server"
+path = "src/main.rs"
+
+[dependencies]
+engine = { path = "../crates/engine" }
+clap = { version = "4.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+[package.metadata.deb]
+maintainer = "BrainBaitDev antonio@brainbait.it"
+copyright = "2025, BrainBaitDev antonio@brainbait.it"
+license-file = ["../LICENSE", "4"]
+extended-description = """\
+NeuroIndex is a high-performance in-memory database with persistence capabilities.
+Features include RESP protocol support, HTTP API, and various indexing structures."""
+depends = "$auto"
+section = "database"
+priority = "optional"
+assets = [
+    ["target/release/neuroindex-server", "usr/bin/", "755"],
+    ["target/release/neuroindex-resp-server", "usr/bin/", "755"],
+    ["target/release/neuroindex-http", "usr/bin/neuroindex-http-server", "755"],
+    ["target/release/neuroindex-cli", "usr/bin/", "755"],
+    ["../README.md", "usr/share/doc/neuroindex/README", "644"],
+    ["../examples/config.toml", "etc/neuroindex/config.toml", "644"],
+    ["systemd/neuroindex-resp.service", "usr/lib/systemd/system/", "644"],
+    ["systemd/neuroindex-http.service", "usr/lib/systemd/system/", "644"],
+]
+conf-files = ["/etc/neuroindex/config.toml"]
+maintainer-scripts = "debian/"
+
+[package.metadata.deb.systemd-units]
+unit-scripts = "systemd/"
+enable = false

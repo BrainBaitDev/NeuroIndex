@@ -1,0 +1,65 @@
+# NeuroIndex Configuration File
+# All settings are optional - defaults will be used if not specified
+
+[server]
+# RESP protocol port (Redis-compatible)
+port = 6379
+
+# HTTP REST API port
+http_port = 8080
+
+# Bind address (use "0.0.0.0" to listen on all interfaces)
+bind = "127.0.0.1"
+
+# Number of worker threads (default: number of CPU cores)
+# workers = 8
+
+[resources]
+# Maximum memory usage (supports units: KB, MB, GB, or plain bytes)
+# Examples: "2GB", "512MB", "1073741824"
+max_memory = "2GB"
+
+# Maximum number of keys (0 = unlimited)
+max_keys = 10000000
+
+# Maximum concurrent clients (0 = unlimited)
+max_clients = 10000
+
+# Maximum request size in bytes (default: 512MB)
+max_request_size = 536870912
+
+# Eviction policy when memory limit is reached
+# Options: "none", "lru", "lfu", "random", "volatile-lru"
+eviction_policy = "lru"
+
+# Eviction threshold (0.0 - 1.0)
+# Start evicting when memory usage reaches this percentage
+eviction_threshold = 0.95
+
+[persistence]
+# Enable/disable persistence
+enabled = true
+
+# Write-Ahead Log file path
+wal_path = "./data/neuroindex.wal"
+
+# Snapshot file path
+snapshot_path = "./data/neuroindex.snap"
+
+# Automatic snapshot interval in seconds (0 = disabled)
+# 300 = 5 minutes, 3600 = 1 hour
+snapshot_interval = 300
+
+# Enable compression for snapshots and WAL
+compression = true
+
+# Compression level (1-22 for zstd, higher = better compression but slower)
+# Recommended: 3 for balanced, 1 for speed, 10+ for maximum compression
+compression_level = 3
+
+# Number of shards (must be power of 2: 2, 4, 8, 16, 32, 64, etc.)
+# More shards = better parallelism on multi-core systems
+shards = 16
+
+# Initial capacity per shard (number of entries)
+capacity_per_shard = 1024

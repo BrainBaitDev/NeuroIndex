@@ -1,0 +1,10 @@
+[package]
+name = "cuckoofilter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ahash = { workspace = true }
+fastrand = "2.0"
+
+[dev-dependencies]

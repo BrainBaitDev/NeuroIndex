@@ -1,0 +1,22 @@
+[Unit]
+Description=NeuroIndex HTTP Server
+Documentation=https://github.com/yourusername/neuroindex
+After=network.target
+
+[Service]
+Type=simple
+User=neuroindex
+Group=neuroindex
+ExecStart=/usr/bin/neuroindex-http-server --port 8080 --persistence-dir /var/lib/neuroindex
+Restart=on-failure
+RestartSec=5s
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/neuroindex /var/log/neuroindex
+
+[Install]
+WantedBy=multi-user.target

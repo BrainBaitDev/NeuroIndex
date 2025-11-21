@@ -58,7 +58,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn interactive_loop(stream: &mut TcpStream, reader: &mut BufReader<TcpStream>) -> Result<(), Box<dyn Error>> {
+fn interactive_loop(
+    stream: &mut TcpStream,
+    reader: &mut BufReader<TcpStream>,
+) -> Result<(), Box<dyn Error>> {
     let mut input = String::new();
     loop {
         print!("neuroindex> ");
@@ -162,12 +165,16 @@ fn read_resp(reader: &mut BufReader<TcpStream>) -> Result<RespValue, Box<dyn Err
         }
         b':' => {
             let line = read_line(reader)?;
-            let value = line.parse::<i64>().map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid integer"))?;
+            let value = line
+                .parse::<i64>()
+                .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid integer"))?;
             Ok(RespValue::Integer(value))
         }
         b'$' => {
             let line = read_line(reader)?;
-            let len = line.parse::<isize>().map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid bulk length"))?;
+            let len = line
+                .parse::<isize>()
+                .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid bulk length"))?;
             if len == -1 {
                 Ok(RespValue::Bulk(None))
             } else {
@@ -179,7 +186,9 @@ fn read_resp(reader: &mut BufReader<TcpStream>) -> Result<RespValue, Box<dyn Err
         }
         b'*' => {
             let line = read_line(reader)?;
-            let len = line.parse::<isize>().map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid array length"))?;
+            let len = line
+                .parse::<isize>()
+                .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid array length"))?;
             if len == -1 {
                 Ok(RespValue::Array(None))
             } else {
@@ -207,7 +216,8 @@ fn read_line(reader: &mut BufReader<TcpStream>) -> io::Result<String> {
         ));
     }
     buf.truncate(buf.len() - 2);
-    String::from_utf8(buf).map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid UTF-8 in line"))
+    String::from_utf8(buf)
+        .map_err(|_| io::Error::new(ErrorKind::InvalidData, "invalid UTF-8 in line"))
 }
 
 fn expect_crlf(reader: &mut BufReader<TcpStream>) -> io::Result<()> {

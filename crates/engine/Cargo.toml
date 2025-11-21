@@ -5,13 +5,84 @@ edition = "2021"
 
 [dependencies]
 cuckoo = { path = "../cuckoo" }
+cuckoofilter = { path = "../cuckoofilter" }
 ttree = { path = "../ttree" }
+art = { path = "../art" }
 ahash = { workspace = true }
 parking_lot = { workspace = true }
 arena = { path = "../arena" }
 hopscotch = { path = "../hopscotch" }
 wal = { path = "../wal" }
 serde = { workspace = true }
+toml = "0.8"
+num_cpus = "1.16"
+sqlparser = "0.52"
+serde_json = "1.0"
+regex = "1.11"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[example]]
+name = "background_snapshots"
+path = "../../examples/background_snapshots.rs"
+
+[[example]]
+name = "resource_limits"
+path = "../../examples/resource_limits.rs"
+
+[[example]]
+name = "resource_tracking_integration"
+path = "../../examples/resource_tracking_integration.rs"
+
+[[example]]
+name = "lru_eviction_demo"
+path = "../../examples/lru_eviction_demo.rs"
+
+[[example]]
+name = "lru_eviction_forced"
+path = "../../examples/lru_eviction_forced.rs"
+
+[[example]]
+name = "robust_recovery_demo"
+path = "../../examples/robust_recovery_demo.rs"
+
+[[example]]
+name = "config_demo"
+path = "../../examples/config_demo.rs"
+
+[[example]]
+name = "sql_demo"
+path = "../../examples/sql_demo.rs"
+
+[[example]]
+name = "ttl_demo"
+path = "../../examples/ttl_demo.rs"
+
+[[example]]
+name = "metrics_demo"
+path = "../../examples/metrics_demo.rs"
+
+[[example]]
+name = "pubsub_demo"
+path = "../../examples/pubsub_demo.rs"
+
+[[example]]
+name = "secondary_index_demo"
+path = "../../examples/secondary_index_demo.rs"
+
+[[example]]
+name = "geospatial_demo"
+path = "../../examples/geospatial_demo.rs"
+
+[[example]]
+name = "sharded_wal_demo"
+path = "../../examples/sharded_wal_demo.rs"
+
+[[example]]
+name = "replication_demo"
+path = "../../examples/replication_demo.rs"
+
+[[example]]
+name = "raft_demo"
+path = "../../examples/raft_demo.rs"

@@ -75,29 +75,29 @@ class NeuroIndexHTTPClient {
     }
 
     async health() {
-        return this._request('GET', '/health');
+        return this._request('GET', '/api/v1/health');
     }
 
     async stats() {
-        return this._request('GET', '/stats');
+        return this._request('GET', '/api/v1/stats');
     }
 
     async put(key, value) {
-        return this._request('POST', `/records/${key}`, { value });
+        return this._request('POST', `/api/v1/records/${key}`, { value });
     }
 
     async get(key) {
-        const result = await this._request('GET', `/records/${key}`);
+        const result = await this._request('GET', `/api/v1/records/${key}`);
         return result ? result.value : null;
     }
 
     async delete(key) {
-        const result = await this._request('DELETE', `/records/${key}`);
+        const result = await this._request('DELETE', `/api/v1/records/${key}`);
         return result.statusCode === 204;
     }
 
     async bulkInsert(records) {
-        return this._request('POST', '/records/bulk', { records });
+        return this._request('POST', '/api/v1/records/bulk', { records });
     }
 
     async rangeQuery(options = {}) {
@@ -107,7 +107,7 @@ class NeuroIndexHTTPClient {
         if (end) params.end = end;
         if (limit) params.limit = limit;
 
-        const result = await this._request('GET', '/records/range', null, params);
+        const result = await this._request('GET', '/api/v1/records/range', null, params);
         return result.results;
     }
 
@@ -117,8 +117,13 @@ class NeuroIndexHTTPClient {
         if (start) params.start = start;
         if (end) params.end = end;
 
-        const result = await this._request('GET', '/aggregations/count', null, params);
+        const result = await this._request('GET', '/api/v1/aggregations/count', null, params);
         return result.count;
+    }
+
+    async executeSql(query) {
+        // POST /api/v1/sql with { query: "..." }
+        return this._request('POST', '/api/v1/sql', { query });
     }
 
     close() {
@@ -175,6 +180,11 @@ async function main() {
         // Stats
         const stats = await client.stats();
         console.log(`\nStats: ${JSON.stringify(stats)}`);
+
+    // Example: SQL over HTTP
+    const sqlResult = await client.executeSql("SELECT key, value FROM kv WHERE value LIKE 'User %' LIMIT 5");
+    console.log('\nSQL result columns:', sqlResult.columns);
+    (sqlResult.rows || []).slice(0,3).forEach(r => console.log('  -', JSON.stringify(r)));
 
         // Delete
         const deleted = await client.delete('user:1');

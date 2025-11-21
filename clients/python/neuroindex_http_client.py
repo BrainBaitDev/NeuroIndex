@@ -22,8 +22,9 @@ except (UnicodeEncodeError, AttributeError, LookupError):
 class NeuroIndexHTTPClient:
     """Python client for NeuroIndex database using HTTP REST API"""
 
-    def __init__(self, base_url: str = "http://localhost:8080/api/v1"):
-        self.base_url = base_url
+    def __init__(self, base_url: str = "http://localhost:8080"):
+        # Ensure base_url doesn't have trailing slash
+        self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
         print(f"{CHECK_MARK} Connected to NeuroIndex HTTP API at {base_url}")
 
@@ -34,50 +35,47 @@ class NeuroIndexHTTPClient:
 
     def health(self) -> Dict[str, str]:
         """Check server health"""
-        url = f"{self.base_url}/health"
+        url = f"{self.base_url}/api/v1/health"
         response = self.session.get(url)
         response.raise_for_status()
         return response.json()
 
     def stats(self) -> Dict[str, Any]:
         """Get server statistics"""
-        url = f"{self.base_url}/stats"
+        url = f"{self.base_url}/api/v1/stats"
         response = self.session.get(url)
         response.raise_for_status()
         return response.json()
 
-    def put(self, key: str, value: Any) -> Dict[str, Any]:
-        """Set a key-value pair"""
-        url = f"{self.base_url}/records/{key}"
-        response = self.session.post(url, json={"value": value})
+    def put(self, key: str, value: str) -> bool:
+        """Insert or update a key-value pair."""
+        url = f"{self.base_url}/api/v1/records/{key}"
+        payload = {"value": value}
+        response = self.session.post(url, json=payload)
         response.raise_for_status()
-        return response.json()
+        return True
 
-    def get(self, key: str) -> Optional[Any]:
-        """Get a value by key"""
-        url = f"{self.base_url}/records/{key}"
+    def get(self, key: str) -> Optional[str]:
+        """Retrieve a value by key."""
+        url = f"{self.base_url}/api/v1/records/{key}"
         response = self.session.get(url)
-
         if response.status_code == 404:
             return None
-
         response.raise_for_status()
-        return response.json()["value"]
+        return response.json().get("value")
 
     def delete(self, key: str) -> bool:
-        """Delete a key"""
-        url = f"{self.base_url}/records/{key}"
+        """Delete a key-value pair."""
+        url = f"{self.base_url}/api/v1/records/{key}"
         response = self.session.delete(url)
         response.raise_for_status()
-        return response.status_code == 204
+        return True
 
     def bulk_insert(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Bulk insert multiple records
-        records: list of {"key": str, "value": any}
-        """
-        url = f"{self.base_url}/records/bulk"
-        response = self.session.post(url, json={"records": records})
+        """Bulk insert multiple key-value pairs."""
+        url = f"{self.base_url}/api/v1/records/bulk"
+        payload = {"records": records}
+        response = self.session.post(url, json=payload)
         response.raise_for_status()
         return response.json()
 
@@ -86,45 +84,49 @@ class NeuroIndexHTTPClient:
         start: Optional[str] = None,
         end: Optional[str] = None,
         limit: Optional[int] = None,
-        username_contains: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Query a range of keys with optional substring filter on username"""
-        url = f"{self.base_url}/records/range"
+        """Query a range of keys."""
+        url = f"{self.base_url}/api/v1/records/range"
         params = {}
-
         if start:
             params["start"] = start
         if end:
             params["end"] = end
         if limit:
             params["limit"] = limit
-        if username_contains:
-            params["username_contains"] = username_contains
-
+        
         response = self.session.get(url, params=params)
         response.raise_for_status()
-        return response.json()["results"]
+        return response.json().get("results", [])
 
     def count(
         self,
         start: Optional[str] = None,
         end: Optional[str] = None,
-        username_contains: Optional[str] = None,
     ) -> int:
-        """Count records in a range with optional substring filter on username"""
-        url = f"{self.base_url}/aggregations/count"
+        """Count records in a range"""
+        url = f"{self.base_url}/api/v1/aggregations/count"
         params = {}
-
         if start:
             params["start"] = start
         if end:
             params["end"] = end
-        if username_contains:
-            params["username_contains"] = username_contains
 
         response = self.session.get(url, params=params)
         response.raise_for_status()
         return response.json()["count"]
+
+    def execute_sql(self, query: str) -> Dict[str, Any]:
+        """Execute a SQL query against the HTTP SQL endpoint.
+
+        Returns the parsed JSON response which typically includes
+        `columns`, `rows` and `rows_affected` depending on the query.
+        """
+        url = f"{self.base_url}/api/v1/sql"
+        payload = {"query": query}
+        response = self.session.post(url, json=payload)
+        response.raise_for_status()
+        return response.json()
 
 
 def main():
@@ -133,7 +135,7 @@ def main():
     print("=" * 50)
 
     # Connect
-    client = NeuroIndexHTTPClient(base_url="http://localhost:8080/api/v1")
+    client = NeuroIndexHTTPClient(base_url="http://localhost:8080")
 
     try:
         # Test health
@@ -158,27 +160,19 @@ def main():
         for record in range_results[:3]:
             print(f"  - {record['key']}: {record['value']}")
 
-        filtered = client.range_query(
-            start="user:10",
-            end="user:200",
-            limit=5,
-            username_contains="_1",
-        )
-        print(f"\nFiltered range (username contains '_1'): {len(filtered)} results")
-
         # Count
         count = client.count(start="user:1", end="user:99")
         print(f"\nCount (user:1 to user:99): {count}")
-        filtered_count = client.count(
-            start="user:1",
-            end="user:999",
-            username_contains="_1",
-        )
-        print(f"Count with username contains '_1': {filtered_count}")
 
         # Stats
         stats = client.stats()
         print(f"\nStats: {stats}")
+
+        # Example: SQL query (HTTP)
+        sql_result = client.execute_sql("SELECT key, value FROM kv WHERE value LIKE 'User %' LIMIT 5")
+        print(f"\nSQL result columns: {sql_result.get('columns')}")
+        for row in sql_result.get('rows', [])[:3]:
+            print(f"  - {row}")
 
         # Delete
         deleted = client.delete("user:1")

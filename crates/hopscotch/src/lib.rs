@@ -265,6 +265,10 @@ where
         self.table.read().len
     }
 
+    pub fn memory_usage(&self) -> usize {
+        self.table.read().capacity() * (std::mem::size_of::<K>() + std::mem::size_of::<V>())
+    }
+
     pub fn entries(&self) -> Vec<(K, V)>
     where
         K: Clone,

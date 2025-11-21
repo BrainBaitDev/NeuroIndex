@@ -3,6 +3,7 @@ use parking_lot::{Mutex, RwLock};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::Arc;
 
+pub mod filter;
 mod opt;
 mod simd;
 
@@ -121,6 +122,10 @@ impl<K: Eq + Hash, V: Clone, S: BuildHasher + Clone + Default> CuckooTable<K, V,
 
     pub fn load_factor(&self) -> f64 {
         self.read().load_factor()
+    }
+
+    pub fn memory_usage(&self) -> usize {
+        self.read().capacity() * (std::mem::size_of::<K>() + std::mem::size_of::<V>())
     }
 
     pub fn get(&self, key: &K) -> Option<V> {

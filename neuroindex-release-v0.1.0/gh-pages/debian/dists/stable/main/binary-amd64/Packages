@@ -1,0 +1,20 @@
+Package: neuroindex
+Version: 0.1.0-1
+Architecture: amd64
+Maintainer: BrainBaitDev antonio@brainbait.it
+Installed-Size: 18266
+Depends: libc6 (>= 2.34)
+Filename: pool/main/neuroindex_0.1.0-1_amd64.deb
+Size: 4099428
+MD5sum: f3244c1bd964fe2fc54ee216673ca7ab
+SHA1: 5938f5b08d0cdcdda34d7b69195dee4f26c88889
+SHA256: dc443e6e443999609ef9c5d1c26c9d15ae179d66d12a2a5001cc5af3485e65d9
+Section: database
+Priority: optional
+Homepage: https://github.com/BrainBaitDev/NeuroIndex
+Description: High-performance in-memory database with persistence
+ NeuroIndex is a high-performance in-memory database with persistence
+ capabilities.
+ Features include RESP protocol support, HTTP API, and various indexing
+ structures.
+

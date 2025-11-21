@@ -1,0 +1,47 @@
+# NeuroIndex Configuration File
+
+[server]
+# RESP server (Redis protocol)
+resp_host = "127.0.0.1"
+resp_port = 6381
+
+# HTTP server
+http_host = "127.0.0.1"
+http_port = 8080
+
+[storage]
+# Directory per i dati persistenti
+data_dir = "/var/lib/neuroindex"
+
+# Directory per i log
+log_dir = "/var/log/neuroindex"
+
+# WAL (Write-Ahead Log) settings
+wal_enabled = true
+wal_sync_interval_ms = 1000
+
+# Snapshot settings
+snapshot_enabled = true
+snapshot_interval_seconds = 3600
+
+[memory]
+# Limite di memoria (in MB, 0 = illimitato)
+max_memory_mb = 0
+
+# Policy di eviction quando si raggiunge il limite
+# Opzioni: "lru", "lfu", "random", "none"
+eviction_policy = "lru"
+
+[performance]
+# Numero di thread per il pool
+worker_threads = 4
+
+# Dimensione del buffer per le operazioni I/O
+io_buffer_size = 8192
+
+[logging]
+# Livello di log: "error", "warn", "info", "debug", "trace"
+level = "info"
+
+# File di log (lasciare vuoto per stdout)
+file = "/var/log/neuroindex/neuroindex.log"

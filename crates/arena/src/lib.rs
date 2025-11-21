@@ -239,6 +239,10 @@ where
         }
         self.inner.blocks.lock().push(boxed);
     }
+
+    pub fn memory_usage(&self) -> usize {
+        self.inner.blocks.lock().len() * BLOCK_SIZE * size_of::<Slot<V>>()
+    }
 }
 
 #[cfg(test)]

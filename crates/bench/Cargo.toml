@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 criterion = { workspace = true }
 engine = { path = "../engine" }
+art = { path = "../art" }
+ttree = { path = "../ttree" }
 rand = { workspace = true }
 
 [[bench]]
@@ -18,4 +20,8 @@ harness = false
 
 [[bench]]
 name = "phase8_perf"
+harness = false
+
+[[bench]]
+name = "art_vs_ttree"
 harness = false

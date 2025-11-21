@@ -1,0 +1,13 @@
+Origin: NeuroIndex
+Label: NeuroIndex
+Suite: stable
+Codename: stable
+Architectures: amd64
+Components: main
+Description: NeuroIndex APT Repository
+MD5Sum:
+ 667d3d9bd3a1386afaecde15fc5fa875 main/binary-amd64/Packages.gz
+ 2f85196379649e2da4f54f5588c740c1 main/binary-amd64/Packages
+SHA256:
+ b13f9c17f5d03fe9a546460216e0ad950ac3a4b8c711c4c8394bc70cc1ee3008 main/binary-amd64/Packages.gz
+ 7b9989d0c82c36e24b841feb8512a5e6c0e4b070c921d3c5dcfe85de09b49bc3 main/binary-amd64/Packages

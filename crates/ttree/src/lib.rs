@@ -385,6 +385,10 @@ impl<K: Ord, V> TTree<K, V> {
         self.len() == 0
     }
 
+    pub fn memory_usage(&self) -> usize {
+        self.len() * (std::mem::size_of::<K>() + std::mem::size_of::<V>())
+    }
+
     pub fn insert(&self, key: K, val: V) -> Option<V>
     where
         V: Clone,

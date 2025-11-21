@@ -1,0 +1,27 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge)
+        # Rimuovi i dati solo se purge (non remove)
+        rm -rf /var/lib/neuroindex
+        rm -rf /var/log/neuroindex
+
+        # Rimuovi l'utente di sistema
+        if getent passwd neuroindex >/dev/null; then
+            userdel neuroindex >/dev/null 2>&1 || true
+        fi
+
+        echo "NeuroIndex e tutti i suoi dati sono stati rimossi."
+        ;;
+
+    remove)
+        # Su remove manteniamo i dati
+        echo "NeuroIndex rimosso. I dati in /var/lib/neuroindex sono stati conservati."
+        echo "Per rimuovere completamente tutto: sudo apt purge neuroindex"
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

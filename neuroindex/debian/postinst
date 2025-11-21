@@ -1,0 +1,49 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    configure)
+        # Crea utente di sistema se non esiste
+        if ! getent passwd neuroindex >/dev/null; then
+            useradd --system --no-create-home --shell /bin/false neuroindex
+        fi
+
+        # Crea directory per i dati
+        mkdir -p /var/lib/neuroindex
+        chown neuroindex:neuroindex /var/lib/neuroindex
+        chmod 755 /var/lib/neuroindex
+
+        # Crea directory per i log
+        mkdir -p /var/log/neuroindex
+        chown neuroindex:neuroindex /var/log/neuroindex
+        chmod 755 /var/log/neuroindex
+
+        # Imposta permessi sul file di configurazione
+        if [ -f /etc/neuroindex/config.toml ]; then
+            chown root:neuroindex /etc/neuroindex/config.toml
+            chmod 640 /etc/neuroindex/config.toml
+        fi
+
+        # Reload systemd
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+
+        echo ""
+        echo "NeuroIndex installato con successo!"
+        echo ""
+        echo "Per avviare il servizio:"
+        echo "  sudo systemctl start neuroindex"
+        echo ""
+        echo "Per abilitare l'avvio automatico:"
+        echo "  sudo systemctl enable neuroindex"
+        echo ""
+        echo "File di configurazione: /etc/neuroindex/config.toml"
+        echo "Directory dati: /var/lib/neuroindex"
+        echo ""
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

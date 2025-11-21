@@ -1,0 +1,24 @@
+Origin: NeuroIndex
+Label: NeuroIndex APT Repository
+Suite: stable
+Codename: stable
+Architectures: amd64
+Components: main
+Description: NeuroIndex High-Performance Database
+Date: Fri, 21 Nov 2025 09:41:44 +0000
+MD5Sum:
+ 0f530600e622ed9eb00ef9b21cdd9b3e              209 Release
+ cb1a4923da90cbba519a8d6912bf7138              701 main/binary-amd64/Packages
+ 0455cede8765a6b69bc6dc96577c7e7a              483 main/binary-amd64/Packages.gz
+SHA1:
+ 1fc46709c01734545f4c71908ba05ef3e971057a              209 Release
+ 6103e8e4cf34a693b2333f19198fec557fe918a9              701 main/binary-amd64/Packages
+ 7a97760be131eb7fa2b9ed098bb3fa9f9f7ca2c2              483 main/binary-amd64/Packages.gz
+SHA256:
+ 0dbc5d142de20338a968e3055db0402fae48614c4a738ddfcbe9d1e8f4c5d867              209 Release
+ 9884dad95d6ad8a2b82f65172a795cc8cc648b07a6107ee87511beed08a69ebf              701 main/binary-amd64/Packages
+ 3e7d03ddd4ded23f3f20e5988af915fa5166bdc1278d93b0c812f3610dad3ecf              483 main/binary-amd64/Packages.gz
+SHA512:
+ fdf70ae3c2593d31d54d78324ff1a63479723f6aa8e2d49d297545c7fe4d03f7149983e2832bb4108927b8ff8438d912a669a82d9b6efa2f895adaf943c4626e              209 Release
+ f6731096126595622792621b4af8d2fcfb69268bdd155ff444bec7545e7933db1ccd518e5ecdeb8018a9317d22116a7caaeeeb2c832a932cf070de78a06ff1e7              701 main/binary-amd64/Packages
+ 81229fa188804f7b17b33ad8ad2e6ff30b42936fc4651c094f86f17c170962991b12055eea821fa70e8912c70b6e979b33804066896f9c84629554122d97e2be              483 main/binary-amd64/Packages.gz
