@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeuroIndex WebSocket Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        .status {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        .status.connected {
+            background: #10b981;
+        }
+        .status.disconnected {
+            background: #ef4444;
+        }
+        .content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            padding: 30px;
+        }
+        .panel {
+            background: #f8fafc;
+            border-radius: 8px;
+            padding: 20px;
+        }
+        .panel h2 {
+            color: #334155;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        .input-group label {
+            display: block;
+            color: #64748b;
+            font-size: 14px;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e2e8f0;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        .input-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+        .btn-success {
+            background: #10b981;
+            color: white;
+        }
+        .btn-success:hover {
+            background: #059669;
+        }
+        .events {
+            background: #1e293b;
+            color: #e2e8f0;
+            border-radius: 8px;
+            padding: 15px;
+            height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+        .event {
+            margin-bottom: 8px;
+            padding: 8px;
+            border-radius: 4px;
+            animation: slideIn 0.3s ease-out;
+        }
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        .event.update {
+            background: rgba(16, 185, 129, 0.1);
+            border-left: 3px solid #10b981;
+        }
+        .event.delete {
+            background: rgba(239, 68, 68, 0.1);
+            border-left: 3px solid #ef4444;
+        }
+        .event.info {
+            background: rgba(59, 130, 246, 0.1);
+            border-left: 3px solid #3b82f6;
+        }
+        .event.error {
+            background: rgba(239, 68, 68, 0.2);
+            border-left: 3px solid #ef4444;
+        }
+        .timestamp {
+            color: #94a3b8;
+            font-size: 11px;
+        }
+        .subscriptions {
+            margin-top: 15px;
+        }
+        .subscription-item {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 16px;
+            font-size: 12px;
+            margin: 4px;
+            animation: fadeIn 0.3s ease-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+        .stat-card .label {
+            color: #64748b;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+        .stat-card .value {
+            color: #1e293b;
+            font-size: 24px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 NeuroIndex WebSocket Test</h1>
+            <div id="status" class="status disconnected">DISCONNECTED</div>
+        </div>
+
+        <div class="content">
+            <!-- Left Panel: Controls -->
+            <div>
+                <div class="panel">
+                    <h2>📡 Connection</h2>
+                    <div class="input-group">
+                        <label>WebSocket URL</label>
+                        <input type="text" id="wsUrl" value="">
+                    </div>
+                    <button class="btn btn-success" onclick="connect()">Connect</button>
+                    <button class="btn btn-danger" onclick="disconnect()">Disconnect</button>
+                    <button class="btn btn-primary" onclick="ping()">Ping</button>
+                </div>
+
+                <div class="panel">
+                    <h2>🔔 Subscriptions</h2>
+                    <div class="input-group">
+                        <label>Pattern (glob: *, ?)</label>
+                        <input type="text" id="pattern" placeholder="user:* or session:?23" value="*">
+                    </div>
+                    <button class="btn btn-primary" onclick="subscribe()">Subscribe</button>
+                    <button class="btn btn-danger" onclick="unsubscribe()">Unsubscribe</button>
+
+                    <div class="subscriptions">
+                        <strong>Active:</strong>
+                        <div id="subscriptionList"></div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>📊 Statistics</h2>
+                    <div class="stats">
+                        <div class="stat-card">
+                            <div class="label">Updates</div>
+                            <div class="value" id="updateCount">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="label">Deletes</div>
+                            <div class="value" id="deleteCount">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="label">Subs</div>
+                            <div class="value" id="subCount">0</div>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="clearEvents()">Clear Events</button>
+                </div>
+            </div>
+
+            <!-- Right Panel: Events -->
+            <div>
+                <div class="panel" style="padding: 0;">
+                    <div style="padding: 20px 20px 10px 20px;">
+                        <h2>📜 Event Stream</h2>
+                    </div>
+                    <div class="events" id="events"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let subscriptions = new Set();
+        let stats = { updates: 0, deletes: 0 };
+
+        function connect() {
+            const url = document.getElementById('wsUrl').value;
+            ws = new WebSocket(url);
+
+            ws.onopen = () => {
+                updateStatus(true);
+                addEvent('info', 'Connected to ' + url);
+            };
+
+            ws.onclose = () => {
+                updateStatus(false);
+                addEvent('error', 'Disconnected');
+                ws = null;
+            };
+
+            ws.onerror = (error) => {
+                addEvent('error', 'WebSocket error: ' + error);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleMessage(msg);
+                } catch (e) {
+                    addEvent('error', 'Invalid JSON: ' + event.data);
+                }
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+                subscriptions.clear();
+                updateSubscriptionList();
+            }
+        }
+
+        function ping() {
+            if (!ws) {
+                alert('Not connected');
+                return;
+            }
+            ws.send(JSON.stringify({ type: 'ping' }));
+            addEvent('info', 'Sent ping');
+        }
+
+        function subscribe() {
+            const pattern = document.getElementById('pattern').value;
+            if (!ws) {
+                alert('Not connected');
+                return;
+            }
+            if (!pattern) {
+                alert('Enter a pattern');
+                return;
+            }
+            ws.send(JSON.stringify({ type: 'subscribe', pattern }));
+            addEvent('info', `Subscribing to: ${pattern}`);
+        }
+
+        function unsubscribe() {
+            const pattern = document.getElementById('pattern').value;
+            if (!ws) {
+                alert('Not connected');
+                return;
+            }
+            if (!pattern) {
+                alert('Enter a pattern');
+                return;
+            }
+            ws.send(JSON.stringify({ type: 'unsubscribe', pattern }));
+            addEvent('info', `Unsubscribing from: ${pattern}`);
+        }
+
+        function handleMessage(msg) {
+            switch (msg.type) {
+                case 'update':
+                    stats.updates++;
+                    document.getElementById('updateCount').textContent = stats.updates;
+                    addEvent('update', `PUT ${msg.key} = ${msg.value}`);
+                    break;
+                case 'delete':
+                    stats.deletes++;
+                    document.getElementById('deleteCount').textContent = stats.deletes;
+                    addEvent('delete', `DELETE ${msg.key}`);
+                    break;
+                case 'subscribed':
+                    subscriptions.add(msg.pattern);
+                    updateSubscriptionList();
+                    addEvent('info', `✓ Subscribed to: ${msg.pattern}`);
+                    break;
+                case 'unsubscribed':
+                    subscriptions.delete(msg.pattern);
+                    updateSubscriptionList();
+                    addEvent('info', `✗ Unsubscribed from: ${msg.pattern}`);
+                    break;
+                case 'pong':
+                    addEvent('info', 'Received pong');
+                    break;
+                case 'error':
+                    addEvent('error', 'Error: ' + msg.message);
+                    break;
+                default:
+                    addEvent('info', 'Unknown message: ' + JSON.stringify(msg));
+            }
+        }
+
+        function addEvent(type, text) {
+            const events = document.getElementById('events');
+            const event = document.createElement('div');
+            event.className = 'event ' + type;
+
+            const timestamp = new Date().toLocaleTimeString();
+            event.innerHTML = `<span class="timestamp">[${timestamp}]</span> ${text}`;
+
+            events.appendChild(event);
+            events.scrollTop = events.scrollHeight;
+        }
+
+        function clearEvents() {
+            document.getElementById('events').innerHTML = '';
+            stats = { updates: 0, deletes: 0 };
+            document.getElementById('updateCount').textContent = '0';
+            document.getElementById('deleteCount').textContent = '0';
+        }
+
+        function updateStatus(connected) {
+            const status = document.getElementById('status');
+            status.className = 'status ' + (connected ? 'connected' : 'disconnected');
+            status.textContent = connected ? 'CONNECTED' : 'DISCONNECTED';
+        }
+
+        function updateSubscriptionList() {
+            const list = document.getElementById('subscriptionList');
+            document.getElementById('subCount').textContent = subscriptions.size;
+
+            if (subscriptions.size === 0) {
+                list.innerHTML = '<em style="color: #94a3b8;">None</em>';
+            } else {
+                list.innerHTML = Array.from(subscriptions)
+                    .map(s => `<span class="subscription-item">${s}</span>`)
+                    .join('');
+            }
+        }
+
+        // Auto-detect WebSocket URL based on current host
+        window.addEventListener('load', () => {
+            // Determine the WebSocket URL from the current page URL
+            // If the page is loaded from http://192.168.1.100:8000/test.html
+            // Then WebSocket should connect to ws://192.168.1.100:9090/ws
+            const hostname = window.location.hostname;
+            const wsUrl = `ws://${hostname}:9090/ws`;
+            document.getElementById('wsUrl').value = wsUrl;
+
+            updateSubscriptionList();
+
+            console.log(`Auto-detected WebSocket URL: ${wsUrl}`);
+            console.log('Click "Connect" to establish WebSocket connection');
+        });
+    </script>
+</body>
+</html>

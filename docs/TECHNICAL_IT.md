@@ -2,17 +2,34 @@
 - [ARCHITETTURA INTERNA](#architettura-interna)
   - [1. Struttura di uno shard](#1-struttura-di-uno-shard)
   - [2. Gestione della memoria: Memory Arena](#2-gestione-della-memoria-memory-arena)
-    - [Come funziona l’Arena?](#come-funziona-l’arena)
+    - [Come funziona l'Arena?](#come-funziona-l'arena)
   - [3. Pipeline di Query](#3-pipeline-di-query)
 - [GLI ALGORITMI](#gli-algoritmi)
   - [1. Cuckoo Hashing](#1-cuckoo-hashing)
+    - [Resize Incrementale](#resize-incrementale)
   - [2. Adaptive Radix Tree (ART)](#2-adaptive-radix-tree-art)
   - [3. Hopscotch Hashing](#3-hopscotch-hashing)
   - [4. Cuckoo Filter](#4-cuckoo-filter)
   - [5. Logica di priorità tra indici](#5-logica-di-priorità-tra-indici)
+- [GESTIONE RISORSE E EVICTION](#gestione-risorse-e-eviction)
+  - [Volatile LRU: Eviction Intelligente](#volatile-lru-eviction-intelligente)
+  - [Politiche di Eviction](#politiche-di-eviction)
+- [CONSENSO DISTRIBUITO: RAFT](#consenso-distribuito-raft)
+  - [Architettura Raft](#architettura-raft)
+  - [Leader Election](#leader-election)
+  - [Log Replication](#log-replication)
+  - [Network Layer HTTP](#network-layer-http)
+- [TRANSAZIONI ACID](#transazioni-acid)
+  - [Two-Phase Locking (2PL)](#two-phase-locking-2pl)
+  - [Snapshot Isolation](#snapshot-isolation)
+  - [Commit e Rollback](#commit-e-rollback)
+- [AUTO-TUNING E OTTIMIZZAZIONE](#auto-tuning-e-ottimizzazione)
+  - [Sistema di Auto-Tuning](#sistema-di-auto-tuning)
+  - [Metriche e Raccomandazioni](#metriche-e-raccomandazioni)
 - [PERSISTENZA E FAILOVER](#persistenza-e-failover)
   - [WAL (Write-Ahead Log) e snapshot](#wal-write-ahead-log-e-snapshot)
   - [Recovery e resistenza ai crash](#recovery-e-resistenza-ai-crash)
+
 
 <div style="page-break-after: always;"></div>
 
@@ -150,6 +167,25 @@ Inoltre, il cuckoo hashing si adatta perfettamente a implementazioni lock-free e
 
 L’adozione del Cuckoo Hashing come motore primario per la gestione delle chiavi garantisce lookup rapidissimi e affidabili a qualsiasi scala operativo, contribuendo in modo sostanziale alla capacità del sistema di gestire query in tempo reale anche quando il volume dei dati cresce in modo significativo.
 
+### Resize Incrementale
+
+Una delle innovazioni chiave di NeuroIndex è l'implementazione del **resize incrementale** per la CuckooTable, che risolve uno dei problemi storici delle hash table: il blocco durante il ridimensionamento.
+
+Tradizionalmente, quando una hash table raggiunge il suo limite di capacità, deve essere ridimensionata in un'unica operazione atomica che blocca tutte le altre operazioni. In NeuroIndex, il resize avviene in modo incrementale:
+
+- **Allocazione Lazy**: La nuova tabella viene allocata ma il trasferimento dei dati avviene gradualmente
+- **Doppia Ricerca**: Durante il resize, le ricerche controllano sia la vecchia che la nuova tabella
+- **Trasferimento Batch**: I dati vengono spostati in piccoli batch durante le normali operazioni
+- **Gestione Overflow Stash**: Se lo stash (area di overflow) si riempie durante il resize, il sistema completa automaticamente il ridimensionamento con un retry loop robusto
+
+Questo approccio garantisce che:
+1. Le operazioni di lettura/scrittura non vengano mai bloccate
+2. Il throughput rimanga costante anche durante il resize
+3. La memoria venga utilizzata in modo efficiente
+4. Non ci siano perdite di dati anche in caso di overflow
+
+Il meccanismo di `finish_resize` assicura che, anche in condizioni di carico estremo, il resize venga completato correttamente senza compromettere l'integrità dei dati.
+
 ## 2. Adaptive Radix Tree (ART)
 L'Adaptive Radix Tree (ART) fornisce un indice ordinato ottimizzato per range query e ricerche per prefisso. L'implementazione attuale utilizza un BTreeMap di Rust altamente ottimizzato che garantisce operazioni O(log n) con eccellente località di cache. È disponibile un'implementazione ART completa con nodi adattivi (Node4/16/48/256) e ricerca SIMD-accelerated per dataset superiori ai 10M di chiavi.
 La vera innovazione dell’ART sta nel suo carattere adattivo: anziché mantenere una struttura fissa per ogni nodo, ART regola dinamicamente il tipo di nodo usato, in base alla densità delle chiavi che ricadono in quel segmento, ottimizzando così sia lo spazio sia la velocità di navigazione.
@@ -232,3 +268,428 @@ Questa procedura protegge sia i dati — che restano sempre coerenti e non subis
 Dal punto di vista della resistenza, NeuroIndex è progettato per minimizzare i punti di failure: la distribuzione lock-free tra shard e la separazione tra indici e memoria riducono le probabilità che un errore locale possa propagarsi e causare danni estesi. Anche in presenza di crash parziali, il sistema può riavviare solo i componenti interessati, senza compromettere l’intero database.
 
 In sintesi, la strategia di recovery e resistenza ai crash di NeuroIndex garantisce che ogni dato sia sempre protetto, recuperabile e integrale, permettendo al database di ripristinare rapidamente il servizio senza perdere informazioni né degradare la performance, anche nelle situazioni più critiche.
+
+<div style="page-break-after: always;"></div>
+
+# GESTIONE RISORSE E EVICTION
+
+La gestione efficiente della memoria è cruciale per un database in-memory come NeuroIndex. Il sistema implementa politiche di eviction sofisticate che bilanciano performance e utilizzo delle risorse.
+
+## Volatile LRU: Eviction Intelligente
+
+La **Volatile LRU** (Least Recently Used) è un'innovazione chiave di NeuroIndex che risolve un problema comune nei sistemi di caching: come evitare di rimuovere dati persistenti quando la memoria è piena.
+
+### Principio di Funzionamento
+
+A differenza delle politiche LRU tradizionali che evictano qualsiasi chiave meno recentemente usata, la Volatile LRU opera selettivamente:
+
+- **Solo chiavi con TTL**: Vengono considerate per l'eviction solo le chiavi che hanno un Time-To-Live impostato
+- **Protezione dati persistenti**: Le chiavi senza TTL (dati persistenti) non vengono mai rimosse automaticamente
+- **Priorità basata su accesso**: Tra le chiavi volatili, vengono rimosse prima quelle meno recentemente accedute
+
+### Vantaggi
+
+1. **Separazione Logica**: Dati di sessione/cache (volatili) vs dati applicativi (persistenti)
+2. **Prevedibilità**: Gli sviluppatori sanno che i dati persistenti non verranno mai evicted
+3. **Efficienza**: Riduce il churn della cache evitando di rimuovere dati che verranno richiesti nuovamente
+4. **Flessibilità**: Permette di usare lo stesso database per caching e storage persistente
+
+### Implementazione
+
+```rust
+// Esempio di utilizzo
+engine.put_with_ttl("session:123", data, Duration::from_secs(3600)); // Volatile
+engine.put("user:456", user_data); // Persistente, mai evicted
+
+// Quando la memoria è piena, solo "session:123" può essere rimosso
+```
+
+## Politiche di Eviction
+
+NeuroIndex supporta multiple politiche di eviction configurabili:
+
+### 1. LRU (Least Recently Used)
+- Rimuove le chiavi meno recentemente accedute
+- Ideale per workload con località temporale
+
+### 2. LFU (Least Frequently Used)
+- Rimuove le chiavi meno frequentemente accedute
+- Ottimale per workload con pattern di accesso stabili
+
+### 3. Volatile LRU
+- Rimuove solo chiavi con TTL, in ordine LRU
+- Perfetto per scenari misti cache+storage
+
+### 4. Volatile LFU
+- Rimuove solo chiavi con TTL, in ordine LFU
+- Combina i vantaggi di LFU e protezione dati persistenti
+
+### Resource Limits
+
+Il sistema permette di configurare limiti precisi:
+
+```rust
+let limits = ResourceLimits {
+    max_memory: Some(1024 * 1024 * 1024), // 1GB
+    max_keys: Some(1_000_000),             // 1M chiavi
+    eviction_target_percentage: 0.8,       // Evict fino all'80%
+};
+
+let engine = Engine::with_shards(4, 16)
+    .with_resource_limits(limits)
+    .with_eviction_policy(EvictionPolicy::VolatileLRU);
+```
+
+Quando i limiti vengono raggiunti, il sistema:
+1. Identifica le chiavi candidate per l'eviction secondo la politica scelta
+2. Rimuove le chiavi fino a raggiungere l'`eviction_target_percentage`
+3. Continua a servire richieste senza interruzioni
+
+<div style="page-break-after: always;"></div>
+
+# CONSENSO DISTRIBUITO: RAFT
+
+NeuroIndex implementa il protocollo **Raft** per garantire consenso distribuito e replicazione dei dati across multiple nodi, trasformando il database da sistema standalone a soluzione distribuita fault-tolerant.
+
+## Architettura Raft
+
+L'implementazione Raft in NeuroIndex segue fedelmente il paper originale "In Search of an Understandable Consensus Algorithm" di Ongaro e Ousterhout, con ottimizzazioni specifiche per database in-memory.
+
+### Componenti Principali
+
+1. **RaftNode**: Rappresenta un singolo nodo nel cluster
+   - Mantiene lo stato (Follower, Candidate, Leader)
+   - Gestisce il log delle operazioni
+   - Coordina elezioni e replicazione
+
+2. **Log Replication**: Ogni operazione di scrittura viene:
+   - Proposta dal leader
+   - Replicata sui follower
+   - Committata quando la maggioranza conferma
+
+3. **State Machine**: Background thread che applica le entry committate allo storage
+
+### Stati del Nodo
+
+- **Follower**: Stato iniziale, riceve append_entries dal leader
+- **Candidate**: Richiede voti per diventare leader
+- **Leader**: Coordina le operazioni di scrittura e invia heartbeat
+
+## Leader Election
+
+Il meccanismo di elezione garantisce che ci sia sempre un solo leader nel cluster:
+
+1. **Timeout Elettorale**: Se un follower non riceve heartbeat, diventa candidate
+2. **Request Vote**: Il candidate richiede voti agli altri nodi
+3. **Maggioranza**: Serve la maggioranza dei voti per diventare leader
+4. **Term**: Ogni elezione incrementa il term, prevenendo elezioni multiple
+
+### Log Consistency
+
+Prima di concedere il voto, ogni nodo verifica che il candidate abbia un log almeno aggiornato quanto il proprio, garantendo che il nuovo leader abbia tutte le operazioni committate.
+
+## Log Replication
+
+Quando il leader riceve una richiesta di scrittura:
+
+```rust
+// Client propone operazione
+engine.put("key", "value"); 
+
+// Leader:
+// 1. Aggiunge al proprio log
+// 2. Invia append_entries ai follower
+// 3. Attende conferma dalla maggioranza
+// 4. Commita l'operazione
+// 5. Applica alla state machine
+```
+
+### AppendEntries RPC
+
+Il leader invia periodicamente `append_entries` per:
+- **Heartbeat**: Mantenere la leadership (ogni 50ms)
+- **Replicazione**: Propagare nuove entry del log
+- **Commit**: Notificare il commit_index ai follower
+
+### State Machine Application
+
+Un background thread monitora continuamente:
+```rust
+loop {
+    let committed_entries = raft.get_committed_entries();
+    for entry in committed_entries {
+        apply_to_storage(entry); // Put/Delete sulla CuckooTable
+        raft.update_last_applied(entry.index);
+    }
+    sleep(10ms);
+}
+```
+
+## Network Layer HTTP
+
+NeuroIndex implementa un network layer basato su HTTP per la comunicazione tra nodi Raft:
+
+### RPC Protocol
+
+Due tipi di RPC principali:
+
+1. **RequestVote**: Per le elezioni
+```json
+{
+  "term": 5,
+  "candidate_id": "node-1",
+  "last_log_index": 100,
+  "last_log_term": 4
+}
+```
+
+2. **AppendEntries**: Per replicazione e heartbeat
+```json
+{
+  "term": 5,
+  "leader_id": "node-1",
+  "prev_log_index": 99,
+  "prev_log_term": 4,
+  "entries": [...],
+  "leader_commit": 98
+}
+```
+
+### Implementazione
+
+- **Client HTTP**: `ureq` per inviare richieste
+- **Server HTTP**: `tiny_http` per ricevere richieste
+- **Serializzazione**: JSON via `serde_json`
+- **Trasporto**: HTTP POST su endpoint dedicati
+
+### Configurazione
+
+```rust
+let raft = RaftNode::new("node-1")
+    .with_network("127.0.0.1:5001");
+
+let engine = Engine::with_shards(4, 16)
+    .with_raft(raft);
+
+// Avvia applier thread
+Engine::start_raft_applier(&engine);
+```
+
+### Vantaggi
+
+- **Fault Tolerance**: Sopravvive a crash di nodi minority
+- **Consistency**: Garantisce linearizability delle scritture
+- **Availability**: Continua a funzionare con majority dei nodi
+- **Partition Tolerance**: Gestisce network partitions correttamente
+
+<div style="page-break-after: always;"></div>
+
+# TRANSAZIONI ACID
+
+NeuroIndex implementa transazioni ACID complete, permettendo operazioni multi-key atomiche con garanzie di consistenza e isolamento.
+
+## Two-Phase Locking (2PL)
+
+Il sistema utilizza **Two-Phase Locking** per garantire la serializzabilità delle transazioni:
+
+### Fasi del Locking
+
+1. **Growing Phase**: La transazione acquisisce lock ma non ne rilascia
+2. **Shrinking Phase**: La transazione rilascia lock ma non ne acquisisce
+
+### Tipi di Lock
+
+- **Read Lock (Shared)**: Multipli reader possono acquisire contemporaneamente
+- **Write Lock (Exclusive)**: Solo un writer alla volta, blocca anche i reader
+
+### Lock Manager
+
+Ogni chiave ha uno stato di lock gestito centralmente:
+
+```rust
+struct LockState {
+    read_locks: HashSet<u64>,   // Transaction IDs con read lock
+    write_lock: Option<u64>,    // Transaction ID con write lock
+}
+```
+
+### Regole di Acquisizione
+
+- **Read Lock**: Concesso se nessun write lock attivo (o se la tx ha già il write lock)
+- **Write Lock**: Concesso solo se nessun altro lock attivo
+- **Lock Upgrade**: Possibile passare da read a write lock
+
+## Snapshot Isolation
+
+NeuroIndex implementa **Snapshot Isolation** per bilanciare performance e consistenza:
+
+### Caratteristiche
+
+- **Read Snapshot**: Ogni transazione legge da uno snapshot consistente
+- **No Dirty Reads**: Mai visibili dati non committati
+- **No Non-Repeatable Reads**: Letture ripetute restituiscono stesso valore
+- **Write Skew**: Possibile ma raro (trade-off accettabile)
+
+### Implementazione
+
+```rust
+struct Transaction<K, V> {
+    id: u64,
+    read_set: HashMap<K, V>,      // Snapshot dei valori letti
+    write_set: HashMap<K, V>,     // Scritture buffered
+    delete_set: HashSet<K>,       // Cancellazioni buffered
+    locks: Vec<(K, LockType)>,    // Lock acquisiti
+    state: TransactionState,      // Active/Preparing/Committed/Aborted
+}
+```
+
+## Commit e Rollback
+
+### Commit Protocol
+
+1. **Validation**: Verifica che la transazione sia in stato Active
+2. **Preparing**: Transizione a stato Preparing
+3. **Apply**: Applica write_set e delete_set atomicamente
+4. **Committed**: Marca come Committed
+5. **Release Locks**: Rilascia tutti i lock
+6. **Cleanup**: Rimuove da active transactions
+
+### Rollback
+
+In caso di errore o abort esplicito:
+1. **Abort State**: Marca transazione come Aborted
+2. **Discard Changes**: Scarta write_set e delete_set
+3. **Release Locks**: Rilascia tutti i lock
+4. **Cleanup**: Rimuove da active transactions
+
+### Esempio d'Uso
+
+```rust
+let tx_mgr = TransactionManager::new();
+
+// Inizia transazione
+let tx = tx_mgr.begin();
+
+// Acquisisce lock e opera
+tx_mgr.acquire_read_lock(&tx, &"account_a")?;
+tx_mgr.acquire_write_lock(&tx, &"account_b")?;
+
+// Buffer modifiche
+tx.write().add_write("account_b", new_balance);
+
+// Commit atomico
+let (writes, deletes) = tx_mgr.commit(tx)?;
+
+// Applica al database
+for (k, v) in writes {
+    engine.put(k, v)?;
+}
+```
+
+### Garanzie ACID
+
+- **Atomicity**: Tutte le operazioni o nessuna
+- **Consistency**: Invarianti mantenuti
+- **Isolation**: Snapshot Isolation + 2PL
+- **Durability**: Combinato con WAL per persistenza
+
+<div style="page-break-after: always;"></div>
+
+# AUTO-TUNING E OTTIMIZZAZIONE
+
+NeuroIndex include un sistema di **auto-tuning** che monitora continuamente le performance e fornisce raccomandazioni per l'ottimizzazione.
+
+## Sistema di Auto-Tuning
+
+### Architettura
+
+Il sistema è composto da:
+
+1. **PerfCounters**: Contatori atomici per metriche
+2. **AutoTuner**: Analizzatore che genera raccomandazioni
+3. **Background Thread**: Esegue analisi periodiche (ogni 60s)
+
+### Metriche Monitorate
+
+```rust
+pub struct PerfCounters {
+    get_ops: AtomicU64,
+    put_ops: AtomicU64,
+    delete_ops: AtomicU64,
+    
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    
+    cuckoo_kicks: AtomicU64,
+    cuckoo_stash_uses: AtomicU64,
+    cuckoo_resizes: AtomicU64,
+    
+    ttree_rotations: AtomicU64,
+    ttree_splits: AtomicU64,
+}
+```
+
+## Metriche e Raccomandazioni
+
+### Categorie di Analisi
+
+1. **Cache Efficiency**
+   - Target: 95% hit rate
+   - Raccomandazione: Aumentare shard count, enable prefetching
+
+2. **Hash Table Efficiency**
+   - Target: < 10 kicks per insert
+   - Raccomandazione: Aumentare table size, migliorare hash functions
+
+3. **Memory Allocation**
+   - Target: < 10 resize in lifetime
+   - Raccomandazione: Pre-allocare capacità maggiore
+
+4. **CPU Optimization**
+   - Target: SIMD enabled su x86_64
+   - Raccomandazione: Abilitare AVX2/SSE4.2
+
+### Esempio Output
+
+```
+=== Auto-Tuning Recommendations ===
+[High] CacheEfficiency: Cache hit rate (80.00%) is below target (95.00%). 
+  Consider: 1) Increasing shard count to improve locality, 
+  2) Enabling prefetching for range queries, 
+  3) Using smaller key/value sizes for better cache line utilization
+
+[Medium] HashTableEfficiency: High cuckoo kick rate (12.50 kicks/op). 
+  Consider: 1) Increasing table size, 
+  2) Using better hash functions, 
+  3) Increasing bucket size from 4 to 8
+===================================
+```
+
+### Attivazione
+
+```rust
+let engine = Arc::new(Engine::with_shards(4, 16));
+
+// Abilita auto-tuning
+Engine::enable_auto_tuning(&engine);
+
+// Il sistema ora analizza performance ogni 60s
+// e logga raccomandazioni automaticamente
+```
+
+### Integrazione con Prometheus
+
+Il sistema espone metriche in formato Prometheus:
+
+```
+neuroindex_operations_total{operation="get"} 1000000
+neuroindex_cache_hit_rate 0.95
+neuroindex_memory_bytes 1073741824
+neuroindex_cuckoo_kicks_total 1250
+```
+
+Questo permette integrazione con:
+- **Grafana**: Dashboard visuali
+- **Alertmanager**: Alert automatici
+- **Prometheus**: Time-series storage
+

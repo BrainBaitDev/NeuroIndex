@@ -25,3 +25,7 @@ harness = false
 [[bench]]
 name = "art_vs_ttree"
 harness = false
+
+[[bench]]
+name = "performance_benchmark"
+harness = false

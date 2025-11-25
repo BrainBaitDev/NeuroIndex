@@ -1,6 +1,6 @@
 [Unit]
 Description=NeuroIndex RESP Server
-Documentation=https://github.com/yourusername/neuroindex
+Documentation=https://github.com/BrainBaitDev/NeuroIndex
 After=network.target
 
 [Service]

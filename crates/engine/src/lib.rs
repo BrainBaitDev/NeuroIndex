@@ -1,13 +1,15 @@
 use crate::eviction::{EvictionPolicy, LfuTracker, LruTracker, ResourceStats, ResourceTracker};
+use crate::optimize::AutoTuner;
 use ahash::RandomState;
 use arena::{Arena, Handle};
 use art::ArtTree;
 use cuckoo::CuckooTable;
 use cuckoofilter::CuckooFilter;
 use hopscotch::HopscotchMap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json;
+use std::any::Any;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
@@ -17,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use std::thread;
 use wal::{read_snapshot, write_snapshot, SnapshotMeta, SnapshotOptions, WalReader, WalRecord};
 
 // Phase 7: Advanced Query Engine
@@ -27,12 +30,17 @@ pub mod geospatial;
 pub mod metrics;
 pub mod optimize;
 pub mod pubsub;
+
+#[cfg(feature = "change-events")]
+pub mod change_events;
 pub mod query;
 pub mod raft;
+pub mod raft_rpc;
 pub mod replication;
 pub mod secondary_index;
 pub mod sharded_wal;
 pub mod sql;
+pub mod transaction;
 pub mod ttl;
 pub use config::PersistenceConfig;
 pub use query::{Aggregator, HashJoinBuilder, QueryPlanner};
@@ -187,6 +195,7 @@ pub use secondary_index::{IndexStats, IndexType, SecondaryIndexManager};
 pub use sharded_wal::{ShardedWal, ShardedWalRecovery, ShardedWalRecoveryStats};
 pub use sql::SqlExecutor;
 pub use ttl::{TtlManager, TtlStats};
+use std::time::SystemTime;
 
 #[derive(Debug, Default)]
 pub struct RecoveryReport {
@@ -233,10 +242,10 @@ pub struct Shard<K, V> {
     ordered: ArtTree<K, Handle<V>>,
     tags: HopscotchMap<u64, Vec<Handle<V>>>,
     reverse_tags: HopscotchMap<usize, Vec<u64>>,
-    // Secondary index: normalized value text -> list of keys holding that value
-    value_index: HopscotchMap<String, Vec<K>>,
-    // Prefix index: short prefixes of normalized values -> list of keys
-    prefix_index: HopscotchMap<String, Vec<K>>,
+    // Secondary index: Unified Value Index using ART
+    // Stores: Normalized Value String -> List of Keys
+    // Supports both exact match and prefix scan efficiently
+    value_index: ArtTree<String, Vec<K>>,
     bloom: Mutex<CuckooFilter>, // Membership filter for negative lookup optimization
 }
 
@@ -252,8 +261,7 @@ where
             ordered: ArtTree::new(),
             tags: HopscotchMap::with_capacity_pow2(cap_pow2),
             reverse_tags: HopscotchMap::with_capacity_pow2(cap_pow2),
-            value_index: HopscotchMap::with_capacity_pow2(cap_pow2),
-            prefix_index: HopscotchMap::with_capacity_pow2(cap_pow2),
+            value_index: ArtTree::new(), // Unified index
             bloom: Mutex::new(CuckooFilter::new(cap_pow2)), // cap_pow2 is already a power of 2
         }
     }
@@ -289,6 +297,24 @@ where
         // Maintain value_index: remove old key from previous value bucket (if any)
         let old_value = prev.map(|old| {
             let val = self.arena.clone_value(old, &guard);
+
+            // Move tag associations from old handle to new handle to preserve tags on updates.
+            if let Some(tags_list) = self.reverse_tags.remove(&old.addr()) {
+                // Update forward map
+                for tag in &tags_list {
+                    self.tags.update_in(tag, |handles| {
+                        for h in handles.iter_mut() {
+                            if *h == old {
+                                *h = handle;
+                            }
+                        }
+                        handles.is_empty()
+                    });
+                }
+                // Register new reverse mapping
+                self.reverse_tags.insert(handle.addr(), tags_list);
+            }
+
             if let Ok(vjson) = serde_json::to_value(&val) {
                 let key = match vjson {
                     serde_json::Value::String(s) => s,
@@ -301,34 +327,23 @@ where
                     }),
                 };
 
-                if let Some(mut vec) = self.value_index.remove(&key) {
-                    vec.retain(|x| x != &k);
-                    if !vec.is_empty() {
-                        self.value_index.insert(key.clone(), vec);
-                    }
-                }
-
-                // remove from prefix_index
-                const PREFIX_LEN: usize = 3;
-                let pref = if key.len() <= PREFIX_LEN {
-                    key.clone()
-                } else {
-                    key.chars().take(PREFIX_LEN).collect()
-                };
-                if let Some(mut pvec) = self.prefix_index.remove(&pref) {
-                    pvec.retain(|x| x != &k);
-                    if !pvec.is_empty() {
-                        self.prefix_index.insert(pref, pvec);
-                    }
+                // Remove from unified ART index
+                // We need to update the vector inside the tree
+                if let Some(mut vec) = self.value_index.get(&key) {
+                     vec.retain(|x| x != &k);
+                     if vec.is_empty() {
+                         self.value_index.delete(&key);
+                     } else {
+                         self.value_index.insert(key, vec);
+                     }
                 }
             }
 
-            self.remove_from_tags(&old);
             self.arena.retire(old, &guard);
             val
         });
 
-        // Add new value to indexes
+        // Add new value to unified index
         if let Ok(vjson) = serde_json::to_value(&v_for_indexing) {
             let key_str = match vjson {
                 serde_json::Value::String(s) => s,
@@ -338,31 +353,12 @@ where
                 other => serde_json::to_string(&other).unwrap_or_default(),
             };
 
-            let existed = self.value_index.update_in(&key_str, |vec| {
-                if !vec.contains(&k) {
-                    vec.push(k.clone());
-                }
-                vec.is_empty()
-            });
-            if !existed {
-                self.value_index.insert(key_str.clone(), vec![k.clone()]);
+            // Update or insert
+            let mut vec = self.value_index.get(&key_str).unwrap_or_default();
+            if !vec.contains(&k) {
+                vec.push(k.clone());
             }
-
-            const PREFIX_LEN: usize = 3;
-            let pref = if key_str.len() <= PREFIX_LEN {
-                key_str.clone()
-            } else {
-                key_str.chars().take(PREFIX_LEN).collect()
-            };
-            let existed_pref = self.prefix_index.update_in(&pref, |vec| {
-                if !vec.contains(&k) {
-                    vec.push(k.clone());
-                }
-                vec.is_empty()
-            });
-            if !existed_pref {
-                self.prefix_index.insert(pref, vec![k.clone()]);
-            }
+            self.value_index.insert(key_str, vec);
         }
 
         old_value
@@ -396,24 +392,12 @@ where
                     }),
                 };
 
-                if let Some(mut vec) = self.value_index.remove(&key) {
+                if let Some(mut vec) = self.value_index.get(&key) {
                     vec.retain(|x| x != k);
-                    if !vec.is_empty() {
-                        self.value_index.insert(key.clone(), vec);
-                    }
-                }
-
-                // remove from prefix_index
-                const PREFIX_LEN: usize = 3;
-                let pref = if key.len() <= PREFIX_LEN {
-                    key.clone()
-                } else {
-                    key.chars().take(PREFIX_LEN).collect()
-                };
-                if let Some(mut pvec) = self.prefix_index.remove(&pref) {
-                    pvec.retain(|x| x != k);
-                    if !pvec.is_empty() {
-                        self.prefix_index.insert(pref, pvec);
+                    if vec.is_empty() {
+                        self.value_index.delete(&key);
+                    } else {
+                        self.value_index.insert(key, vec);
                     }
                 }
             }
@@ -571,6 +555,7 @@ where
             + self.ordered.memory_usage()
             + self.tags.memory_usage()
             + self.reverse_tags.memory_usage()
+            + self.value_index.memory_usage()
     }
 }
 
@@ -589,6 +574,7 @@ pub struct Engine<K, V> {
     shards_pow2: usize,
     per_shard_cap_pow2: usize,
     persistence: Option<EnginePersistence<K, V>>,
+    snapshot_lock: Option<Arc<RwLock<()>>>,
     resource_tracker: Option<Arc<ResourceTracker>>,
     lru_tracker: Option<Arc<LruTracker<K>>>,
     lfu_tracker: Option<Arc<LfuTracker<K>>>,
@@ -596,9 +582,45 @@ pub struct Engine<K, V> {
     metrics: Option<Arc<MetricsCollector>>,
     pubsub: Option<Arc<PubSubManager>>,
 
+    // Change event subscribers (feature-gated)
+    #[cfg(feature = "change-events")]
+    change_subscribers: Arc<Mutex<Vec<Arc<dyn change_events::ChangeSubscriber>>>>,
+
     // Cheap atomic counters for O(1) metrics
     total_keys: Arc<AtomicU64>,
     total_ops: Arc<AtomicU64>,
+    raft: Option<Arc<RaftNode<K, V>>>,
+    raft_applier_running: Option<Arc<AtomicU64>>, // 0 = stopped, 1 = running
+    auto_tuner: Option<Arc<AutoTuner>>,
+    auto_tuner_running: Option<Arc<AtomicU64>>, // 0 = stopped, 1 = running
+}
+
+/// Best-effort estimation of total size (stack + heap) for common key/value types.
+/// Falls back to `size_of_val` when the type is not recognized.
+fn approximate_size<T: 'static>(value: &T) -> usize {
+    let base = std::mem::size_of_val(value);
+    let extra = if let Some(s) = (value as &dyn Any).downcast_ref::<String>() {
+        s.capacity()
+    } else if let Some(v) = (value as &dyn Any).downcast_ref::<Vec<u8>>() {
+        v.capacity()
+    } else if let Some(vs) = (value as &dyn Any).downcast_ref::<Vec<String>>() {
+        // account for vector backing storage + each string buffer
+        vs.capacity() * std::mem::size_of::<String>()
+            + vs.iter().map(|s| s.capacity()).sum::<usize>()
+    } else {
+        0
+    };
+
+    base + extra
+}
+
+#[cfg(feature = "change-events")]
+fn stringify_for_subscriber<T: Serialize>(value: &T) -> Option<String> {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(s)) => Some(s),
+        Ok(other) => serde_json::to_string(&other).ok(),
+        Err(_) => None,
+    }
 }
 
 impl<K, V> Engine<K, V>
@@ -617,6 +639,30 @@ where
 {
     pub fn with_shards(n_shards_pow2: usize, per_shard_cap_pow2: usize) -> Self {
         Self::new_internal(n_shards_pow2, per_shard_cap_pow2, None, None)
+    }
+
+    pub fn with_resource_limits(mut self, limits: eviction::ResourceLimits) -> Self {
+        let (resource_tracker, lru_tracker, lfu_tracker) = {
+            let lru = if matches!(
+                limits.eviction_policy,
+                EvictionPolicy::LRU | EvictionPolicy::VolatileLRU
+            ) {
+                Some(Arc::new(LruTracker::new()))
+            } else {
+                None
+            };
+            let lfu = if matches!(limits.eviction_policy, EvictionPolicy::LFU) {
+                Some(Arc::new(LfuTracker::new()))
+            } else {
+                None
+            };
+            (Some(Arc::new(ResourceTracker::new(limits))), lru, lfu)
+        };
+
+        self.resource_tracker = resource_tracker;
+        self.lru_tracker = lru_tracker;
+        self.lfu_tracker = lfu_tracker;
+        self
     }
 
     pub fn with_persistence(config: PersistenceConfig) -> io::Result<Self> {
@@ -643,6 +689,85 @@ where
         ))
     }
 
+    pub fn with_raft(mut self, raft: Arc<RaftNode<K, V>>) -> Self {
+        self.raft = Some(raft);
+        self
+    }
+
+    /// Start the Raft applier thread (call this after wrapping Engine in Arc)
+    pub fn start_raft_applier(engine: &Arc<Self>) {
+        if let Some(raft_node) = &engine.raft {
+            let running = Arc::new(AtomicU64::new(1));
+            
+            // Store running flag (we'll need to add this field)
+            if let Some(existing) = &engine.raft_applier_running {
+                existing.store(1, Ordering::Relaxed);
+            }
+            
+            let engine_weak = Arc::downgrade(engine);
+            let raft_clone = raft_node.clone();
+            
+            thread::spawn(move || {
+                while running.load(Ordering::Relaxed) == 1 {
+                    if let Some(engine) = engine_weak.upgrade() {
+                        let entries = raft_clone.get_committed_entries();
+                        
+                        for entry in entries {
+                            match &entry.command {
+                                crate::replication::ReplicationOp::Put { key, value } => {
+                                    let _ = engine.put_internal(key.clone(), value.clone(), false);
+                                }
+                                crate::replication::ReplicationOp::Delete { key } => {
+                                    let _ = engine.delete_internal(key.clone(), false);
+                                }
+                                crate::replication::ReplicationOp::Tag { key, tag } => {
+                                    let _ = engine.tag_internal(key.clone(), *tag, false);
+                                }
+                            }
+                            
+                            raft_clone.update_last_applied(entry.index);
+                        }
+                    } else {
+                        break;
+                    }
+                    
+                    thread::sleep(Duration::from_millis(10));
+                }
+            });
+        }
+    }
+
+    /// Enable auto-tuning system (call this after wrapping Engine in Arc)
+    pub fn enable_auto_tuning(engine: &Arc<Self>) {
+        let tuner = Arc::new(AutoTuner::with_default());
+        let running = Arc::new(AtomicU64::new(1));
+        
+        let engine_weak = Arc::downgrade(engine);
+        let tuner_clone = tuner.clone();
+        
+        thread::spawn(move || {
+            while running.load(Ordering::Relaxed) == 1 {
+                if let Some(_engine) = engine_weak.upgrade() {
+                    // Analyze performance and get recommendations
+                    let recommendations = tuner_clone.analyze();
+                    
+                    if !recommendations.is_empty() {
+                        eprintln!("\n=== Auto-Tuning Recommendations ===");
+                        for rec in recommendations {
+                            eprintln!("{}", rec);
+                        }
+                        eprintln!("===================================\n");
+                    }
+                } else {
+                    break;
+                }
+                
+                // Run analysis every 60 seconds
+                thread::sleep(Duration::from_secs(60));
+            }
+        });
+    }
+
     pub fn recover(config: PersistenceConfig) -> io::Result<Self> {
         Self::recover_with_report(config).map(|(engine, _report)| engine)
     }
@@ -657,7 +782,8 @@ where
 
         // Load snapshot
         let snapshot = read_snapshot::<_, K, V>(&config.snapshot_path)?;
-        let engine = Self::with_persistence(config.clone())?;
+        let mut engine = Self::with_persistence(config.clone())?;
+        engine.enable_ttl();
 
         if let Some(data) = snapshot {
             report.snapshot_records = data.entries.len();
@@ -673,6 +799,10 @@ where
             }
             for (key, tag) in data.tags {
                 let _ = engine.tag_internal(key, tag, false)?;
+            }
+            // Restore TTL deadlines (skip expired)
+            for (key, expires_at_ms) in data.ttls {
+                let _ = engine.set_ttl_epoch_ms(key, expires_at_ms);
             }
 
             report.total_recovered += report.snapshot_records;
@@ -854,56 +984,12 @@ where
             Err(_) => return Vec::new(),
         };
 
-        // Try a cheap prefix optimization: if pattern is 'abc%' (no other wildcards), use prefix_index
-        if let Some(prefix) = like_pattern.strip_suffix('%') {
-            // ensure prefix contains no other '%' or '_'
-            if !prefix.contains('%') && !prefix.contains('_') {
-                let search_prefix = if prefix.len() <= 3 {
-                    prefix.to_string()
-                } else {
-                    prefix.chars().take(3).collect()
-                };
-                let mut out = Vec::new();
-                for shard in &self.shards {
-                    if let Some(keys) = shard.prefix_index.get(&search_prefix) {
-                        for key in keys.iter() {
-                            if let Some(v) = shard.get(key) {
-                                // final check against full regex to respect case of longer prefix
-                                if re.is_match(&{
-                                    // normalize value for matching similar to other code paths
-                                    if let Ok(vjson) = serde_json::to_value(&v) {
-                                        match vjson {
-                                            serde_json::Value::String(s) => s,
-                                            serde_json::Value::Number(n) => n.to_string(),
-                                            serde_json::Value::Bool(b) => b.to_string(),
-                                            serde_json::Value::Null => "null".to_string(),
-                                            other => {
-                                                serde_json::to_string(&other).unwrap_or_else(|_| {
-                                                    serde_json::to_string(&v).unwrap_or_else(|_| {
-                                                        "<unserializable>".to_string()
-                                                    })
-                                                })
-                                            }
-                                        }
-                                    } else {
-                                        serde_json::to_string(&v)
-                                            .unwrap_or_else(|_| "<unserializable>".to_string())
-                                    }
-                                }) {
-                                    out.push((key.clone(), v));
-                                }
-                            }
-                        }
-                    }
-                }
-                return out;
-            }
-        }
+
 
         let mut out = Vec::new();
         for shard in &self.shards {
             // iterate value_index keys
-            for (val_key, keys) in shard.value_index.entries() {
+            for (val_key, keys) in shard.value_index.range(Bound::Unbounded, Bound::Unbounded) {
                 if re.is_match(&val_key) {
                     for key in keys.iter() {
                         if let Some(v) = shard.get(key) {
@@ -1056,9 +1142,17 @@ where
             .persistence
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "persistence not configured"))?;
+        // Exclusive lock so mutating ops (and WAL appends) wait until snapshot finishes,
+        // avoiding WAL truncation that could drop concurrent writes.
+        let _snapshot_guard = self
+            .snapshot_lock
+            .as_ref()
+            .map(|lock| lock.write())
+            .expect("snapshot lock should exist when persistence is configured");
         self.flush()?;
         let entries = self.export_entries();
         let tags = self.export_tags();
+        let ttls = self.export_ttls();
         let meta = SnapshotMeta {
             shards_pow2: self.shards_pow2 as u32,
             shard_cap_pow2: self.per_shard_cap_pow2 as u32,
@@ -1069,6 +1163,7 @@ where
             meta,
             entries,
             tags,
+            ttls,
         )?;
         persistence.wal.truncate_all()?;
         Ok(())
@@ -1097,6 +1192,10 @@ where
             .map(|_| Arc::new(Shard::new(per_shard_cap_pow2, Arc::new(Arena::new()))))
             .collect();
 
+        // When persistence is enabled, snapshots must exclude concurrent mutating operations
+        // so that WAL truncation does not drop freshly appended records.
+        let snapshot_lock = persistence.as_ref().map(|_| Arc::new(RwLock::new(())));
+
         let (resource_tracker, lru_tracker, lfu_tracker) = if let Some(limits) = resource_limits {
             let lru = if matches!(
                 limits.eviction_policy,
@@ -1123,14 +1222,21 @@ where
             shards_pow2,
             per_shard_cap_pow2,
             persistence,
+            snapshot_lock,
             resource_tracker,
             lru_tracker,
             lfu_tracker,
             ttl_manager: None,
             metrics: None,
             pubsub: None,
+            #[cfg(feature = "change-events")]
+            change_subscribers: Arc::new(Mutex::new(Vec::new())),
             total_keys: Arc::new(AtomicU64::new(0)),
             total_ops: Arc::new(AtomicU64::new(0)),
+            raft: None,
+            raft_applier_running: None,
+            auto_tuner: None,
+            auto_tuner_running: None,
         }
     }
 
@@ -1142,6 +1248,22 @@ where
     }
 
     fn put_internal(&self, k: K, v: V, log: bool) -> io::Result<Option<V>> {
+        if let Some(raft) = &self.raft {
+            if raft.state() == crate::raft::RaftState::Leader {
+                raft.propose(crate::replication::ReplicationOp::Put { key: k, value: v });
+                return Ok(None);
+            } else {
+                return Err(io::Error::new(io::ErrorKind::Other, "Not a leader"));
+            }
+        }
+
+        // Prevent snapshots from truncating WAL while this mutation is in flight.
+        let _snapshot_guard = if log {
+            self.snapshot_lock.as_ref().map(|lock| lock.read())
+        } else {
+            None
+        };
+
         // Check if key already exists (for resource limit check)
         let idx = self.shard_idx(&k);
         let key_exists = self.shards[idx].get(&k).is_some();
@@ -1154,8 +1276,8 @@ where
                     self.perform_eviction()?;
                 }
 
-                let key_size = std::mem::size_of_val(&k);
-                let value_size = std::mem::size_of_val(&v);
+                let key_size = approximate_size(&k);
+                let value_size = approximate_size(&v);
 
                 // Now check if we can insert
                 tracker
@@ -1180,8 +1302,8 @@ where
 
         // Update resource tracking
         if let Some(tracker) = &self.resource_tracker {
-            let key_size = std::mem::size_of_val(&k);
-            let value_size = std::mem::size_of_val(&v);
+            let key_size = approximate_size(&k);
+            let value_size = approximate_size(&v);
 
             if old_value.is_none() {
                 // New key inserted
@@ -1190,7 +1312,7 @@ where
             } else {
                 // Existing key updated - only count value size difference
                 if let Some(ref old_v) = old_value {
-                    let old_size = std::mem::size_of_val(old_v);
+                    let old_size = approximate_size(old_v);
                     if value_size > old_size {
                         tracker.add_memory(value_size - old_size);
                     } else {
@@ -1201,10 +1323,31 @@ where
 
             // Track access for LRU/LFU
             if let Some(lru) = &self.lru_tracker {
-                lru.touch(&k);
+                let is_volatile_policy = self
+                    .resource_tracker
+                    .as_ref()
+                    .map(|t| t.stats().eviction_policy == EvictionPolicy::VolatileLRU)
+                    .unwrap_or(false);
+
+                if !is_volatile_policy || self.ttl(&k).is_some() {
+                    lru.touch(&k);
+                }
             }
             if let Some(lfu) = &self.lfu_tracker {
                 lfu.touch(&k);
+            }
+        }
+
+        // Notify change event subscribers
+        #[cfg(feature = "change-events")]
+        {
+            // Convert K/V to String preserving plain strings
+            if let (Some(key_txt), Some(value_txt)) =
+                (stringify_for_subscriber(&k), stringify_for_subscriber(&v))
+            {
+                for subscriber in self.change_subscribers.lock().iter() {
+                    subscriber.on_put(&key_txt, &value_txt);
+                }
             }
         }
 
@@ -1212,6 +1355,22 @@ where
     }
 
     fn delete_internal(&self, key: K, log: bool) -> io::Result<Option<V>> {
+        if let Some(raft) = &self.raft {
+            if raft.state() == crate::raft::RaftState::Leader {
+                raft.propose(crate::replication::ReplicationOp::Delete { key });
+                return Ok(None);
+            } else {
+                return Err(io::Error::new(io::ErrorKind::Other, "Not a leader"));
+            }
+        }
+
+        // Prevent snapshots from truncating WAL while this mutation is in flight.
+        let _snapshot_guard = if log {
+            self.snapshot_lock.as_ref().map(|lock| lock.read())
+        } else {
+            None
+        };
+
         if log {
             if let Some(persistence) = &self.persistence {
                 persistence.wal.append_delete(&key)?;
@@ -1230,8 +1389,8 @@ where
         // Update resource tracking
         if let Some(tracker) = &self.resource_tracker {
             if let Some(ref value) = deleted {
-                let key_size = std::mem::size_of_val(&key);
-                let value_size = std::mem::size_of_val(value);
+                let key_size = approximate_size(&key);
+                let value_size = approximate_size(value);
                 tracker.sub_memory(key_size + value_size);
                 tracker.decrement_keys();
 
@@ -1252,10 +1411,26 @@ where
             }
         }
 
+        // Notify change event subscribers
+        #[cfg(feature = "change-events")]
+        if deleted.is_some() {
+            if let Some(key_txt) = stringify_for_subscriber(&key) {
+                for subscriber in self.change_subscribers.lock().iter() {
+                    subscriber.on_delete(&key_txt);
+                }
+            }
+        }
+
         Ok(deleted)
     }
 
     fn tag_internal(&self, key: K, tag: u64, log: bool) -> io::Result<bool> {
+        let _snapshot_guard = if log {
+            self.snapshot_lock.as_ref().map(|lock| lock.read())
+        } else {
+            None
+        };
+
         if log {
             if let Some(persistence) = &self.persistence {
                 persistence.wal.append_tag(&key, tag)?;
@@ -1266,6 +1441,12 @@ where
     }
 
     fn untag_internal(&self, key: K, tag: u64, log: bool) -> io::Result<bool> {
+        let _snapshot_guard = if log {
+            self.snapshot_lock.as_ref().map(|lock| lock.read())
+        } else {
+            None
+        };
+
         if log {
             if let Some(persistence) = &self.persistence {
                 persistence.wal.append_untag(&key, tag)?;
@@ -1289,6 +1470,12 @@ where
             WalRecord::Untag { key, tag } => {
                 let _ = self.untag_internal(key, tag, log)?;
             }
+            WalRecord::TtlSet { key, expires_at_ms } => {
+                let _ = self.set_ttl_epoch_ms(key, expires_at_ms);
+            }
+            WalRecord::TtlRemove { key } => {
+                let _ = self.persist_internal(&key, false);
+            }
         }
         Ok(())
     }
@@ -1309,6 +1496,16 @@ where
         out
     }
 
+    pub fn export_ttls(&self) -> Vec<(K, u64)>
+    where
+        K: Clone,
+    {
+        if let Some(ttl_mgr) = &self.ttl_manager {
+            return ttl_mgr.lock().export_deadlines_ms();
+        }
+        Vec::new()
+    }
+
     pub fn shards_pow2(&self) -> usize {
         self.shards_pow2
     }
@@ -1324,7 +1521,12 @@ where
     }
 
     pub fn memory_usage(&self) -> usize {
-        self.shards.iter().map(|s| s.memory_usage()).sum()
+        if let Some(rt) = &self.resource_tracker {
+            return rt.stats().memory_used as usize;
+        }
+
+        // Fallback when resource tracking is disabled: best-effort structural usage
+        self.shards.iter().map(|s| s.memory_usage()).sum::<usize>()
     }
 
     /// Get total keys count (O(1) with atomic counter)
@@ -1361,10 +1563,43 @@ where
         let result = self.put(k.clone(), v)?;
 
         if let Some(ttl_mgr) = &self.ttl_manager {
-            ttl_mgr.lock().set_ttl(k, ttl);
+            // Protect against concurrent snapshot truncation of the WAL.
+            let _snapshot_guard = self.snapshot_lock.as_ref().map(|lock| lock.read());
+            if let Some(persistence) = &self.persistence {
+                if let Some(epoch_ms) = SystemTime::now()
+                    .checked_add(ttl)
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                {
+                    persistence.wal.append_ttl_set(&k, epoch_ms)?;
+                }
+            }
+
+            ttl_mgr.lock().set_ttl(k.clone(), ttl);
+            
+            // If VolatileLRU, we must start tracking this key now that it has a TTL
+            if let Some(lru) = &self.lru_tracker {
+                 let is_volatile_policy = self
+                    .resource_tracker
+                    .as_ref()
+                    .map(|t| t.stats().eviction_policy == EvictionPolicy::VolatileLRU)
+                    .unwrap_or(false);
+                
+                if is_volatile_policy {
+                    lru.touch(&k);
+                }
+            }
         }
 
         Ok(result)
+    }
+
+    /// Internal helper to set TTL from an absolute epoch time (milliseconds).
+    pub(crate) fn set_ttl_epoch_ms(&self, k: K, expires_at_ms: u64) -> bool {
+        if let Some(ttl_mgr) = &self.ttl_manager {
+            return ttl_mgr.lock().set_ttl_epoch_ms(k, expires_at_ms);
+        }
+        false
     }
 
     /// Set expiration on an existing key
@@ -1372,7 +1607,35 @@ where
         if let Some(ttl_mgr) = &self.ttl_manager {
             // Check if key exists
             if self.get(k).is_some() {
+                // Protect WAL from being truncated mid-write
+                let _snapshot_guard = self.snapshot_lock.as_ref().map(|lock| lock.read());
+                if let Some(persistence) = &self.persistence {
+                    if let Some(epoch_ms) = SystemTime::now()
+                        .checked_add(ttl)
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                    {
+                        if let Err(e) = persistence.wal.append_ttl_set(k, epoch_ms) {
+                            eprintln!("Failed to append TTL set to WAL: {}", e);
+                        }
+                    }
+                }
+
                 ttl_mgr.lock().set_ttl(k.clone(), ttl);
+
+                // If VolatileLRU, we must start tracking this key now that it has a TTL
+                if let Some(lru) = &self.lru_tracker {
+                     let is_volatile_policy = self
+                        .resource_tracker
+                        .as_ref()
+                        .map(|t| t.stats().eviction_policy == EvictionPolicy::VolatileLRU)
+                        .unwrap_or(false);
+                    
+                    if is_volatile_policy {
+                        lru.touch(k);
+                    }
+                }
+
                 return true;
             }
         }
@@ -1381,8 +1644,37 @@ where
 
     /// Remove TTL from a key (make it persistent)
     pub fn persist(&self, k: &K) -> bool {
+        self.persist_internal(k, true)
+    }
+
+    pub(crate) fn persist_internal(&self, k: &K, log: bool) -> bool {
         if let Some(ttl_mgr) = &self.ttl_manager {
-            ttl_mgr.lock().remove_ttl(k)
+            let removed = ttl_mgr.lock().remove_ttl(k);
+            if removed && log {
+                let _snapshot_guard = self.snapshot_lock.as_ref().map(|lock| lock.read());
+                if let Some(persistence) = &self.persistence {
+                    if let Err(e) = persistence.wal.append_ttl_remove(k) {
+                        eprintln!("Failed to append TTL remove to WAL: {}", e);
+                    }
+                }
+            }
+            
+            // If VolatileLRU, we must stop tracking this key now that it is persistent
+            if removed {
+                if let Some(lru) = &self.lru_tracker {
+                     let is_volatile_policy = self
+                        .resource_tracker
+                        .as_ref()
+                        .map(|t| t.stats().eviction_policy == EvictionPolicy::VolatileLRU)
+                        .unwrap_or(false);
+                    
+                    if is_volatile_policy {
+                        lru.remove(k);
+                    }
+                }
+            }
+
+            removed
         } else {
             false
         }
@@ -1405,6 +1697,37 @@ where
     /// Check if TTL is enabled
     pub fn has_ttl(&self) -> bool {
         self.ttl_manager.is_some()
+    }
+
+    /// Cleanup expired keys (best-effort) and return number of deletions.
+    /// Can be called from a background task to enforce TTL without reads.
+    pub fn cleanup_expired_keys(&self) -> usize {
+        let Some(ttl_mgr) = &self.ttl_manager else {
+            return 0;
+        };
+
+        let expired = ttl_mgr.lock().get_expired_keys();
+        if expired.is_empty() {
+            return 0;
+        }
+
+        let mut deleted = 0usize;
+        for key in &expired {
+            #[cfg(feature = "change-events")]
+            if let Some(txt) = stringify_for_subscriber(key) {
+                for subscriber in self.change_subscribers.lock().iter() {
+                    subscriber.on_expire(&txt);
+                }
+            }
+            if self.delete(key).ok().flatten().is_some() {
+                deleted += 1;
+            }
+        }
+
+        // Remove from tracking regardless of delete outcome to avoid reprocessing
+        ttl_mgr.lock().cleanup_expired_keys(&expired);
+
+        deleted
     }
 
     // ===== Metrics Methods =====
@@ -1463,8 +1786,48 @@ where
         self.pubsub.as_ref().map(|ps| ps.publish(topic, payload))
     }
 
-    /// Get number of active subscribers
-    pub fn subscriber_count(&self) -> Option<usize> {
+    // ===== Change Events Methods =====
+
+    /// Register a change event subscriber
+    ///
+    /// The subscriber will receive notifications for all PUT and DELETE operations.
+    /// Multiple subscribers can be registered and will all receive events.
+    ///
+    /// **Note**: This feature requires the `change-events` feature flag.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use engine::change_events::ChangeSubscriber;
+    ///
+    /// #[derive(Debug)]
+    /// struct MySubscriber;
+    ///
+    /// impl ChangeSubscriber for MySubscriber {
+    ///     fn on_put(&self, key: &str, value: &str) {
+    ///         println!("PUT: {} = {}", key, value);
+    ///     }
+    ///     fn on_delete(&self, key: &str) {
+    ///         println!("DELETE: {}", key);
+    ///     }
+    /// }
+    ///
+    /// let mut engine = Engine::with_shards(4, 16);
+    /// engine.register_subscriber(Arc::new(MySubscriber));
+    /// ```
+    #[cfg(feature = "change-events")]
+    pub fn register_subscriber(&self, subscriber: Arc<dyn change_events::ChangeSubscriber>) {
+        self.change_subscribers.lock().push(subscriber);
+    }
+
+    /// Get the number of registered change subscribers
+    #[cfg(feature = "change-events")]
+    pub fn change_subscriber_count(&self) -> usize {
+        self.change_subscribers.lock().len()
+    }
+
+    /// Get number of active pubsub subscribers
+    pub fn pubsub_subscriber_count(&self) -> Option<usize> {
         self.pubsub.as_ref().map(|ps| ps.subscriber_count())
     }
 
@@ -1487,8 +1850,16 @@ where
 
         let stats = tracker.stats();
         let bytes_to_free = tracker.bytes_to_evict();
+        
+        // If we are at or above the limit, we need to evict.
+        // Even if we are exactly AT the limit, we need to evict 1 to make room for the new insert.
+        let keys_over_limit = if stats.keys_count >= stats.limits.max_keys {
+            (stats.keys_count + 1).saturating_sub(stats.limits.max_keys)
+        } else {
+            0
+        };
 
-        if bytes_to_free == 0 {
+        if bytes_to_free == 0 && keys_over_limit == 0 {
             return Ok(());
         }
 
@@ -1500,7 +1871,8 @@ where
             1024 // Default 1KB if unknown
         };
 
-        let estimated_keys = (bytes_to_free / avg_size).max(1);
+        let estimated_keys_mem = (bytes_to_free / avg_size).max(if bytes_to_free > 0 { 1 } else { 0 });
+        let estimated_keys = estimated_keys_mem.max(keys_over_limit);
 
         // Get keys to evict based on policy
         let keys_to_evict = match stats.eviction_policy {
@@ -1934,3 +2306,5 @@ mod tests {
         }
     }
 }
+
+

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 const WAL_MAGIC: &[u8; 4] = b"NIWL";
 const WAL_VERSION: u16 = 1;
 const SNAP_MAGIC: &[u8; 4] = b"NISN";
-const SNAP_VERSION: u16 = 1;
+const SNAP_VERSION: u16 = 2;
 const COMPRESSED_FLAG: u16 = 0b0001;
 
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +32,8 @@ pub enum WalRecord<K, V> {
     Delete { key: K },
     Tag { key: K, tag: u64 },
     Untag { key: K, tag: u64 },
+    TtlSet { key: K, expires_at_ms: u64 },
+    TtlRemove { key: K },
 }
 
 #[derive(Debug)]
@@ -116,6 +118,19 @@ where
             key: key.clone(),
             tag,
         };
+        self.append_record(&record)
+    }
+
+    pub fn append_ttl_set(&mut self, key: &K, expires_at_ms: u64) -> io::Result<()> {
+        let record = WalRecord::TtlSet {
+            key: key.clone(),
+            expires_at_ms,
+        };
+        self.append_record(&record)
+    }
+
+    pub fn append_ttl_remove(&mut self, key: &K) -> io::Result<()> {
+        let record = WalRecord::TtlRemove { key: key.clone() };
         self.append_record(&record)
     }
 
@@ -232,6 +247,9 @@ enum SnapshotRecord<K, V> {
     TagsStart,
     Tag { key: K, tag: u64 },
     TagsEnd,
+    TtlStart,
+    Ttl { key: K, expires_at_ms: u64 },
+    TtlEnd,
 }
 
 #[derive(Debug)]
@@ -239,14 +257,16 @@ pub struct SnapshotData<K, V> {
     pub meta: SnapshotMeta,
     pub entries: Vec<(K, V)>,
     pub tags: Vec<(K, u64)>,
+    pub ttls: Vec<(K, u64)>,
 }
 
-pub fn write_snapshot<P, K, V, IE, IT>(
+pub fn write_snapshot<P, K, V, IE, IT, ITtl>(
     path: P,
     options: SnapshotOptions,
     meta: SnapshotMeta,
     entries: IE,
     tags: IT,
+    ttls: ITtl,
 ) -> io::Result<()>
 where
     P: AsRef<Path>,
@@ -254,6 +274,7 @@ where
     V: Serialize,
     IE: IntoIterator<Item = (K, V)>,
     IT: IntoIterator<Item = (K, u64)>,
+    ITtl: IntoIterator<Item = (K, u64)>,
 {
     let mut file = File::create(path)?;
     file.write_all(SNAP_MAGIC)?;
@@ -275,6 +296,12 @@ where
         bincode::serialize_into(&mut writer, &rec).map_err(to_io_err)?;
     }
     bincode::serialize_into(&mut writer, &SnapshotRecord::<K, V>::TagsEnd).map_err(to_io_err)?;
+    bincode::serialize_into(&mut writer, &SnapshotRecord::<K, V>::TtlStart).map_err(to_io_err)?;
+    for (k, expires_at_ms) in ttls {
+        let rec: SnapshotRecord<K, V> = SnapshotRecord::Ttl { key: k, expires_at_ms };
+        bincode::serialize_into(&mut writer, &rec).map_err(to_io_err)?;
+    }
+    bincode::serialize_into(&mut writer, &SnapshotRecord::<K, V>::TtlEnd).map_err(to_io_err)?;
     writer.flush()?;
     Ok(())
 }
@@ -300,7 +327,7 @@ where
         ));
     }
     let version = u16::from_le_bytes(version);
-    if version != SNAP_VERSION {
+    if version != SNAP_VERSION && version != 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unsupported snapshot version",
@@ -311,6 +338,7 @@ where
     let mut entries = Vec::new();
     let mut tags = Vec::new();
     let mut state = SnapshotState::None;
+    let mut ttls = Vec::new();
 
     loop {
         match bincode::deserialize_from::<_, SnapshotRecord<K, V>>(&mut decoder) {
@@ -318,6 +346,15 @@ where
             Ok(SnapshotRecord::EntriesEnd) => state = SnapshotState::None,
             Ok(SnapshotRecord::TagsStart) => state = SnapshotState::Tags,
             Ok(SnapshotRecord::TagsEnd) => {
+                if version == 1 {
+                    state = SnapshotState::Finished;
+                    break;
+                } else {
+                    state = SnapshotState::None;
+                }
+            }
+            Ok(SnapshotRecord::TtlStart) => state = SnapshotState::Ttls,
+            Ok(SnapshotRecord::TtlEnd) => {
                 state = SnapshotState::Finished;
                 break;
             }
@@ -339,6 +376,15 @@ where
                 }
                 tags.push((key, tag));
             }
+            Ok(SnapshotRecord::Ttl { key, expires_at_ms }) => {
+                if state != SnapshotState::Ttls {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "ttl outside TTL section",
+                    ));
+                }
+                ttls.push((key, expires_at_ms));
+            }
             Err(e) => {
                 if let bincode::ErrorKind::Io(ref io_err) = *e {
                     if io_err.kind() == io::ErrorKind::UnexpectedEof {
@@ -350,7 +396,7 @@ where
         }
     }
 
-    if state != SnapshotState::Finished {
+    if state != SnapshotState::Finished && version != 1 {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "snapshot ended unexpectedly",
@@ -361,6 +407,7 @@ where
         meta,
         entries,
         tags,
+        ttls,
     }))
 }
 
@@ -369,6 +416,7 @@ enum SnapshotState {
     None,
     Entries,
     Tags,
+    Ttls,
     Finished,
 }
 
@@ -423,6 +471,8 @@ mod tests {
         let mut writer = WalWriter::<u64, String>::open(&wal_path, WalOptions::default()).unwrap();
         writer.append_put(&1, &"hello".to_string()).unwrap();
         writer.append_tag(&1, 42).unwrap();
+        writer.append_ttl_set(&1, 1_700_000_000_000).unwrap();
+        writer.append_ttl_remove(&1).unwrap();
         writer.append_delete(&1).unwrap();
         writer.flush().unwrap();
 
@@ -442,6 +492,17 @@ mod tests {
             other => panic!("unexpected record {:?}", other),
         }
         match reader.next().unwrap() {
+            Some(WalRecord::TtlSet { key, expires_at_ms }) => {
+                assert_eq!(key, 1);
+                assert_eq!(expires_at_ms, 1_700_000_000_000);
+            }
+            other => panic!("unexpected record {:?}", other),
+        }
+        match reader.next().unwrap() {
+            Some(WalRecord::TtlRemove { key }) => assert_eq!(key, 1),
+            other => panic!("unexpected record {:?}", other),
+        }
+        match reader.next().unwrap() {
             Some(WalRecord::Delete { key }) => assert_eq!(key, 1),
             other => panic!("unexpected record {:?}", other),
         }
@@ -454,6 +515,7 @@ mod tests {
         let snap_path = dir.path().join("snapshot.bin");
         let entries = (0u64..16).map(|k| (k, format!("val{:#x}", k)));
         let tags = vec![(0u64, 7), (3, 9), (3, 19)];
+        let ttls = vec![(0u64, 1_800_000_000_000), (3, 1_700_000_100_000)];
         write_snapshot(
             &snap_path,
             SnapshotOptions::default(),
@@ -463,6 +525,7 @@ mod tests {
             },
             entries,
             tags.clone(),
+            ttls.clone(),
         )
         .unwrap();
 
@@ -470,5 +533,6 @@ mod tests {
         assert_eq!(data.meta.shards_pow2, 8);
         assert_eq!(data.entries.len(), 16);
         assert_eq!(data.tags, tags);
+        assert_eq!(data.ttls, ttls);
     }
 }

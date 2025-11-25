@@ -5,6 +5,7 @@ use clap::Parser;
 use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::signal;
+use tokio::process::Child;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Deserialize)]
@@ -171,16 +172,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let http_port = args.http_port.unwrap_or(config.server.http_port);
     let data_dir = args.data_dir.unwrap_or_else(|| PathBuf::from(&config.storage.data_dir));
 
+    let shard_count = 1usize << args.shards_pow2;
+    let shard_capacity = 1usize << args.shard_cap_pow2;
+
     info!("📋 Configuration:");
-    info!("   RESP port: {}", resp_port);
-    info!("   HTTP port: {}", http_port);
+    info!("   RESP: {}:{}", config.server.resp_host, resp_port);
+    info!("   HTTP: {}:{}", config.server.http_host, http_port);
     info!("   Data directory: {}", data_dir.display());
-    info!("   Shards: 2^{} = {}", args.shards_pow2, 1 << args.shards_pow2);
-    info!(
-        "   Shard capacity: 2^{} = {}",
-        args.shard_cap_pow2,
-        1 << args.shard_cap_pow2
-    );
+    info!("   Shards: {} (2^{})", shard_count, args.shards_pow2);
+    info!("   Shard capacity: {} (2^{})", shard_capacity, args.shard_cap_pow2);
 
     // Create data directory if it doesn't exist
     if !data_dir.exists() {
@@ -188,53 +188,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("   Created data directory");
     }
 
-    // Initialize engine with persistence
-    let wal_path = data_dir.join("wal");
-    let snapshot_path = data_dir.join("snapshot");
+    let data_dir_str = data_dir.to_string_lossy().to_string();
 
-    info!("   WAL path: {}", wal_path.display());
-    info!("   Snapshot path: {}", snapshot_path.display());
-
-    // Create engine (this will be shared between servers)
-    info!("📦 Initializing engine...");
-
-    // Here you would initialize your actual engine
-    // For now, this is a placeholder - you'll need to adapt this
-    // based on your actual Engine implementation
-
-    info!("✅ Engine initialized");
-
-    let mut handles = vec![];
+    let mut children: Vec<(&str, Child)> = Vec::new();
 
     // Start RESP server if enabled
     if !args.no_resp {
-        info!("🔌 Starting RESP server on port {}", resp_port);
+        info!("🔌 Launching RESP server process");
+        let resp_args = vec![
+            "--host".to_string(),
+            config.server.resp_host.clone(),
+            "--port".to_string(),
+            resp_port.to_string(),
+            "--shards".to_string(),
+            shard_count.to_string(),
+            "--capacity".to_string(),
+            shard_capacity.to_string(),
+            "--persistence-dir".to_string(),
+            data_dir_str.clone(),
+        ];
 
-        let resp_handle = tokio::spawn(async move {
-            if let Err(e) = start_resp_server(resp_port).await {
-                error!("RESP server error: {}", e);
-            }
-        });
-
-        handles.push(resp_handle);
-        info!("✅ RESP server listening on 0.0.0.0:{}", resp_port);
+        let child = launch_server_process("RESP", "neuroindex-resp-server", &resp_args)?;
+        info!("✅ RESP server spawned (args: {:?})", resp_args);
+        children.push(("RESP", child));
     }
 
     // Start HTTP server if enabled
     if !args.no_http {
-        info!("🌐 Starting HTTP server on port {}", http_port);
+        info!("🌐 Launching HTTP server process");
+        let http_args = vec![
+            "--host".to_string(),
+            config.server.http_host.clone(),
+            "--port".to_string(),
+            http_port.to_string(),
+            "--shards".to_string(),
+            shard_count.to_string(),
+            "--capacity".to_string(),
+            shard_capacity.to_string(),
+            "--persistence-dir".to_string(),
+            data_dir_str.clone(),
+        ];
 
-        let http_handle = tokio::spawn(async move {
-            if let Err(e) = start_http_server(http_port).await {
-                error!("HTTP server error: {}", e);
-            }
-        });
-
-        handles.push(http_handle);
-        info!("✅ HTTP server listening on 0.0.0.0:{}", http_port);
+        let child = launch_server_process("HTTP", "neuroindex-http", &http_args)?;
+        info!("✅ HTTP server spawned (args: {:?})", http_args);
+        children.push(("HTTP", child));
     }
 
-    if handles.is_empty() {
+    if children.is_empty() {
         error!("❌ No servers enabled! Use --no-resp or --no-http to disable specific servers.");
         return Ok(());
     }
@@ -252,53 +252,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Wait for all server tasks to complete
-    for handle in handles {
-        let _ = handle.await;
+    // Try to stop child processes gracefully
+    for (name, child) in children.iter_mut() {
+        if let Some(pid) = child.id() {
+            info!("🔻 Sending termination to {} server (pid {})", name, pid);
+        }
+        if let Err(e) = child.start_kill() {
+            warn!("Failed to signal {} server for shutdown: {}", name, e);
+        }
+    }
+
+    for (name, mut child) in children {
+        match child.wait().await {
+            Ok(status) => {
+                if status.success() {
+                    info!("{} server exited cleanly", name);
+                } else {
+                    warn!("{} server exited with status {:?}", name, status);
+                }
+            }
+            Err(e) => warn!("Failed to wait for {} server: {}", name, e),
+        }
     }
 
     info!("👋 NeuroIndex shutdown complete");
     Ok(())
 }
 
-async fn start_resp_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: Integrate with actual RESP server implementation
-    // For now, this is a placeholder
-    use tokio::net::TcpListener;
-
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).await?;
-
-    loop {
-        match listener.accept().await {
-            Ok((_socket, addr)) => {
-                info!("RESP client connected from {}", addr);
-                // TODO: Handle RESP protocol
-            }
-            Err(e) => {
-                error!("RESP accept error: {}", e);
-            }
-        }
-    }
-}
-
-async fn start_http_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: Integrate with actual HTTP server implementation
-    // For now, this is a placeholder
-    use tokio::net::TcpListener;
-
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr).await?;
-
-    loop {
-        match listener.accept().await {
-            Ok((_socket, addr)) => {
-                info!("HTTP client connected from {}", addr);
-                // TODO: Handle HTTP requests
-            }
-            Err(e) => {
-                error!("HTTP accept error: {}", e);
-            }
-        }
-    }
+fn launch_server_process(
+    label: &str,
+    binary: &str,
+    args: &[String],
+) -> Result<Child, Box<dyn std::error::Error>> {
+    info!("Starting {} server: {} {}", label, binary, args.join(" "));
+    tokio::process::Command::new(binary)
+        .args(args)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Failed to start {} server ({}): {}", label, binary, e).into())
 }

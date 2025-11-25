@@ -111,7 +111,10 @@ where
     /// Get entries since sequence number (for replica sync)
     pub fn get_entries_since(&self, since: u64) -> Vec<ReplicationEntry<K, V>> {
         let log = self.replication_log.read();
-        log.iter().filter(|e| e.sequence > since).cloned().collect()
+        log.iter()
+            .filter(|e| e.sequence >= since)
+            .cloned()
+            .collect()
     }
 
     /// Apply entries from master (replica only)

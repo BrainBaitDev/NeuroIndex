@@ -119,6 +119,20 @@ where
         shard.append_untag(key, tag)
     }
 
+    /// Append a TTL SET record to the appropriate shard
+    pub fn append_ttl_set(&self, key: &K, expires_at_ms: u64) -> io::Result<()> {
+        let shard_idx = self.shard_for_key(key);
+        let mut shard = self.shards[shard_idx].lock();
+        shard.append_ttl_set(key, expires_at_ms)
+    }
+
+    /// Append a TTL REMOVE record to the appropriate shard
+    pub fn append_ttl_remove(&self, key: &K) -> io::Result<()> {
+        let shard_idx = self.shard_for_key(key);
+        let mut shard = self.shards[shard_idx].lock();
+        shard.append_ttl_remove(key)
+    }
+
     /// Append a generic record to the appropriate shard
     pub fn append_record(&self, key: &K, record: &WalRecord<K, V>) -> io::Result<()> {
         let shard_idx = self.shard_for_key(key);
@@ -191,6 +205,17 @@ impl ShardedWalRecovery {
             + 'static,
         V: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     {
+        // Mirror shard naming used by ShardedWal::new
+        let shard_pattern = if let Some(path_str) = base_path.to_str() {
+            if path_str.ends_with(".wal") {
+                base_path.to_path_buf()
+            } else {
+                base_path.join("wal")
+            }
+        } else {
+            base_path.join("wal")
+        };
+
         let mut stats = ShardedWalRecoveryStats {
             shards_recovered: 0,
             total_records: 0,
@@ -201,7 +226,7 @@ impl ShardedWalRecovery {
         };
 
         for shard_id in 0..num_shards {
-            let shard_path = base_path.join(format!("wal.{}", shard_id));
+            let shard_path = PathBuf::from(format!("{}.{}", shard_pattern.display(), shard_id));
 
             if !shard_path.exists() {
                 continue;
@@ -230,6 +255,12 @@ impl ShardedWalRecovery {
                             WalRecord::Untag { key, tag } => {
                                 stats.tag_records += 1;
                                 let _ = engine.untag(&key, tag);
+                            }
+                            WalRecord::TtlSet { key, expires_at_ms } => {
+                                let _ = engine.set_ttl_epoch_ms(key, expires_at_ms);
+                            }
+                            WalRecord::TtlRemove { key } => {
+                                let _ = engine.persist_internal(&key, false);
                             }
                         }
                     }
@@ -338,6 +369,40 @@ mod tests {
 
         // Verify data
         for i in 0..10 {
+            let key = format!("key:{}", i);
+            let value = engine.get(&key).unwrap();
+            assert_eq!(value, format!("value:{}", i));
+        }
+    }
+
+    #[test]
+    fn test_recovery_with_wal_suffix_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_path = temp_dir.path().join("neuroindex.wal");
+
+        // Write some data using .wal suffix (shards stored as neuroindex.wal.<id>)
+        {
+            let wal =
+                ShardedWal::<String, String>::new(&wal_path, 4, WalOptions::default()).unwrap();
+
+            for i in 0..6 {
+                let key = format!("key:{}", i);
+                let value = format!("value:{}", i);
+                wal.append_put(&key, &value).unwrap();
+            }
+
+            wal.flush_all().unwrap();
+        }
+
+        // Recover into new engine using the same base path
+        let mut engine = Engine::<String, String>::with_shards(8, 16);
+        let stats =
+            ShardedWalRecovery::recover(&mut engine, &wal_path, 4).expect("recovery failed");
+
+        assert_eq!(stats.total_records, 6);
+        assert_eq!(stats.put_records, 6);
+
+        for i in 0..6 {
             let key = format!("key:{}", i);
             let value = engine.get(&key).unwrap();
             assert_eq!(value, format!("value:{}", i));

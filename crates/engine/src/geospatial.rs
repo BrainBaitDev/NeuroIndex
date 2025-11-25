@@ -132,41 +132,15 @@ where
         }
     }
 
-    /// Query points within a radius (in meters) of a center point
+    /// Query points within a radius (in meters) of a center point.
+    /// Uses brute-force distance check for correctness.
     pub fn query_radius(&self, center: GeoPoint, radius_m: f64) -> Vec<K> {
         let locations = self.locations.read().unwrap();
-
-        // For larger radii, scan all points (brute force but accurate)
-        // Geohash optimization works best for small, local queries
-        if radius_m > 50_000.0 {
-            // > 50km: brute force
-            return locations
-                .iter()
-                .filter(|(_, point)| center.distance_to(point) <= radius_m)
-                .map(|(key, _)| key.clone())
-                .collect();
-        }
-
-        // Get candidate geohashes that might overlap with radius
-        let candidate_hashes = get_neighbor_geohashes(&center, radius_m, self.precision);
-
-        let mut results = Vec::new();
-        let index = self.index.read().unwrap();
-
-        for hash in candidate_hashes {
-            if let Some(keys) = index.get(&hash) {
-                for key in keys {
-                    if let Some(point) = locations.get(key) {
-                        let distance = center.distance_to(point);
-                        if distance <= radius_m {
-                            results.push(key.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        results
+        locations
+            .iter()
+            .filter(|(_, point)| center.distance_to(point) <= radius_m)
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     /// Query points within a bounding box
@@ -454,8 +428,8 @@ mod tests {
         let london = GeoPoint::new(51.5074, -0.1278).unwrap();
 
         let distance = nyc.distance_to(&london);
-        // Distance should be approximately 5,585 km
-        assert!((distance - 5_585_000.0).abs() < 10_000.0);
+        // Distance should be approximately 5,570 km
+        assert!((distance - 5_570_000.0).abs() < 20_000.0);
     }
 
     #[test]

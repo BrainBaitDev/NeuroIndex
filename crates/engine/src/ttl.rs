@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// TTL (Time-To-Live) manager for automatic key expiration
 pub struct TtlManager<K> {
@@ -88,6 +88,18 @@ where
             true
         } else {
             false
+        }
+    }
+
+    /// Set TTL using an absolute UNIX epoch (milliseconds). Returns true if scheduled.
+    pub fn set_ttl_epoch_ms(&self, key: K, expires_at_ms: u64) -> bool {
+        let deadline = UNIX_EPOCH + Duration::from_millis(expires_at_ms);
+        match deadline.duration_since(SystemTime::now()) {
+            Ok(remaining) if remaining > Duration::from_millis(0) => {
+                self.set_ttl(key, remaining);
+                true
+            }
+            _ => false, // already expired or invalid
         }
     }
 
@@ -174,6 +186,28 @@ where
             keys_expired: 0, // This will be tracked by the engine
             next_expiration_ms,
         }
+    }
+
+    /// Export TTL deadlines as UNIX epoch milliseconds (best-effort).
+    pub fn export_deadlines_ms(&self) -> Vec<(K, u64)> {
+        let now_instant = Instant::now();
+        let now_system = SystemTime::now();
+        let expirations = self.key_expirations.lock().unwrap();
+        let mut out = Vec::with_capacity(expirations.len());
+
+        for (key, instant_deadline) in expirations.iter() {
+            if *instant_deadline <= now_instant {
+                continue;
+            }
+            let remaining = *instant_deadline - now_instant;
+            if let Some(deadline_system) = now_system.checked_add(remaining) {
+                if let Ok(epoch) = deadline_system.duration_since(UNIX_EPOCH) {
+                    out.push((key.clone(), epoch.as_millis() as u64));
+                }
+            }
+        }
+
+        out
     }
 
     /// Start background cleanup worker

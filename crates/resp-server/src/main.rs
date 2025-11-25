@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 mod rate_limit;
@@ -25,17 +26,18 @@ use resource_limits::RespResourceLimits;
 type SharedEngine = Arc<Engine<String, String>>;
 
 const BINARY_PREFIX: &str = "__BINARY__";
+const KEYS_RESULT_LIMIT: usize = 10_000;
 
 fn init_new_engine_with_persistence(
     shards_pow2: usize,
     shard_cap_pow2: usize,
     wal_path: PathBuf,
     snapshot_path: PathBuf,
-) -> io::Result<Arc<Engine<String, String>>> {
+) -> io::Result<Engine<String, String>> {
     let config =
         engine::PersistenceConfig::new(shards_pow2, shard_cap_pow2, wal_path, snapshot_path);
     match Engine::with_persistence(config) {
-        Ok(engine) => Ok(Arc::new(engine)),
+        Ok(engine) => Ok(engine),
         Err(e) => Err(e),
     }
 }
@@ -147,8 +149,9 @@ async fn main() -> std::io::Result<()> {
             snapshot_path.clone(),
         );
         match Engine::recover(config.clone()) {
-            Ok(engine) => {
+            Ok(mut engine) => {
                 info!("Successfully recovered engine from persistence");
+                engine.enable_ttl();
                 Arc::new(engine)
             }
             Err(err) => match err.kind() {
@@ -157,12 +160,14 @@ async fn main() -> std::io::Result<()> {
                         "No persistence files found (WAL: {:?}, snapshot: {:?}). Starting fresh.",
                         wal_path, snapshot_path
                     );
-                    init_new_engine_with_persistence(
+                    let mut engine = init_new_engine_with_persistence(
                         args.shards,
                         args.capacity,
                         wal_path.clone(),
                         snapshot_path.clone(),
-                    )?
+                    )?;
+                    engine.enable_ttl();
+                    Arc::new(engine)
                 }
                 io::ErrorKind::UnexpectedEof => {
                     warn!(
@@ -184,8 +189,9 @@ async fn main() -> std::io::Result<()> {
                         &snapshot_path,
                     );
                     match Engine::recover(retry_config) {
-                        Ok(engine) => {
+                        Ok(mut engine) => {
                             info!("Recovery succeeded after removing snapshot.");
+                            engine.enable_ttl();
                             Arc::new(engine)
                         }
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -193,12 +199,14 @@ async fn main() -> std::io::Result<()> {
                                 "Snapshot removed but WAL missing (WAL: {:?}). Starting fresh.",
                                 wal_path
                             );
-                            init_new_engine_with_persistence(
+                            let mut engine = init_new_engine_with_persistence(
                                 args.shards,
                                 args.capacity,
                                 wal_path.clone(),
                                 snapshot_path.clone(),
-                            )?
+                            )?;
+                            engine.enable_ttl();
+                            Arc::new(engine)
                         }
                         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                             warn!(
@@ -215,12 +223,14 @@ async fn main() -> std::io::Result<()> {
                                     );
                                 }
                             }
-                            init_new_engine_with_persistence(
+                            let mut engine = init_new_engine_with_persistence(
                                 args.shards,
                                 args.capacity,
                                 wal_path.clone(),
                                 snapshot_path.clone(),
-                            )?
+                            )?;
+                            engine.enable_ttl();
+                            Arc::new(engine)
                         }
                         Err(e) => {
                             error!(
@@ -241,7 +251,9 @@ async fn main() -> std::io::Result<()> {
             },
         }
     } else {
-        Arc::new(Engine::with_shards(args.shards, args.capacity))
+        let mut engine = Engine::with_shards(args.shards, args.capacity);
+        engine.enable_ttl();
+        Arc::new(engine)
     };
 
     // Start server
@@ -280,7 +292,7 @@ async fn main() -> std::io::Result<()> {
             "Starting background snapshots every {} seconds",
             args.snapshot_interval
         );
-        let engine_snap = Arc::clone(&engine);
+        let engine_snap: SharedEngine = Arc::clone(&engine);
         let interval_secs = args.snapshot_interval;
 
         Some(tokio::spawn(async move {
@@ -328,10 +340,11 @@ async fn main() -> std::io::Result<()> {
     );
 
     let engine_for_shutdown = Arc::clone(&engine);
+    let txn_lock = Arc::new(Mutex::new(()));
 
     // Run server with graceful shutdown
     tokio::select! {
-        _ = accept_loop(listener, engine, rate_limiter, limits) => {},
+        _ = accept_loop(listener, engine, rate_limiter, limits, txn_lock) => {},
         _ = shutdown_signal(engine_for_shutdown) => {},
     }
 
@@ -350,6 +363,7 @@ async fn accept_loop(
     engine: SharedEngine,
     rate_limiter: Option<RateLimiter>,
     limits: RespResourceLimits,
+    txn_lock: Arc<Mutex<()>>,
 ) {
     loop {
         match listener.accept().await {
@@ -365,11 +379,19 @@ async fn accept_loop(
                         let engine = Arc::clone(&engine);
                         let limiter = rate_limiter.clone();
                         let limits_clone = limits.clone();
+                        let txn_lock = Arc::clone(&txn_lock);
 
                         tokio::spawn(async move {
                             let _guard = _guard; // Keep guard alive for connection lifetime
-                            if let Err(e) =
-                                handle_client(stream, addr, engine, limiter, limits_clone).await
+                            if let Err(e) = handle_client(
+                                stream,
+                                addr,
+                                engine,
+                                limiter,
+                                limits_clone,
+                                txn_lock,
+                            )
+                            .await
                             {
                                 error!("Error handling client {}: {}", addr, e);
                             } else {
@@ -387,6 +409,92 @@ async fn accept_loop(
             Err(e) => {
                 error!("Failed to accept connection: {}", e);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    /// Lightweight RESP smoke test with concurrent clients hitting the server.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resp_server_handles_concurrent_set_get() {
+        let engine = Arc::new({
+            let mut e = Engine::with_shards(4, 1 << 6);
+            e.enable_ttl();
+            e
+        });
+
+        // Bind to ephemeral port
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Minimal limits and rate limiter
+        let limits = RespResourceLimits::new(None, None, 1024);
+        let rate_limiter = RateLimiter::new(RateLimiterConfig {
+            commands_per_second: 0,
+            burst_capacity: 0,
+        });
+        let txn_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+        let server_engine = Arc::clone(&engine);
+        let server_limits = limits.clone();
+        let server_handle = tokio::spawn(async move {
+            accept_loop(listener, server_engine, rate_limiter, server_limits, txn_lock).await;
+        });
+
+        // Launch concurrent clients
+        let clients = 8;
+        let mut handles = Vec::new();
+        for i in 0..clients {
+            let addr = addr.clone();
+            handles.push(tokio::spawn(async move {
+                let key = format!("k{}", i);
+                let value = format!("v{}", i);
+                let mut stream = TcpStream::connect(addr).await.unwrap();
+
+                // SET key value
+                let set_cmd = format!(
+                    "*3\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
+                    key.len(),
+                    key,
+                    value.len(),
+                    value
+                );
+                stream.write_all(set_cmd.as_bytes()).await.unwrap();
+                let mut buf = [0u8; 32];
+                let n = stream.read(&mut buf).await.unwrap();
+                assert!(std::str::from_utf8(&buf[..n]).unwrap().starts_with("+OK"));
+
+                // GET key
+                let get_cmd = format!("*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n", key.len(), key);
+                stream.write_all(get_cmd.as_bytes()).await.unwrap();
+                let mut resp = vec![0u8; 64];
+                let n = stream.read(&mut resp).await.unwrap();
+                let body = String::from_utf8_lossy(&resp[..n]);
+                assert!(
+                    body.contains(&value),
+                    "unexpected GET response for {}: {}",
+                    key,
+                    body
+                );
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Shutdown server task
+        server_handle.abort();
+
+        // Verify state in engine
+        for i in 0..clients {
+            let key = format!("k{}", i);
+            assert_eq!(engine.get(&key), Some(format!("v{}", i)));
         }
     }
 }
@@ -446,6 +554,7 @@ async fn handle_client(
     engine: SharedEngine,
     rate_limiter: Option<RateLimiter>,
     limits: RespResourceLimits,
+    txn_lock: Arc<Mutex<()>>,
 ) -> std::io::Result<()> {
     let mut buffer = BytesMut::with_capacity(8192);
     let client_ip = addr.ip();
@@ -506,7 +615,7 @@ async fn handle_client(
                     match cmd_upper.as_str() {
                         "EXEC" => {
                             // Execute all queued commands atomically
-                            let results = execute_transaction(&queue, &engine).await;
+                            let results = execute_transaction(&queue, &engine, txn_lock.clone()).await;
                             transaction_queue = None;
                             encode_transaction_results(&results)
                         }
@@ -793,17 +902,31 @@ async fn execute_command(args: &[Vec<u8>], engine: &SharedEngine) -> Vec<u8> {
         }
 
         "KEYS" => {
-            // Simplified: return all keys (pattern matching not implemented)
+            let pattern = if args.len() >= 2 {
+                match bytes_to_string(&args[1]) {
+                    Ok(s) => s,
+                    Err(_) => return encode_error("ERR invalid UTF-8 in pattern"),
+                }
+            } else {
+                "*".to_string()
+            };
+
             use std::ops::Bound::Unbounded;
-            let all = engine.range(Unbounded, Unbounded);
-            let keys: Vec<String> = all.into_iter().map(|(k, _)| k).collect();
+            let mut keys = Vec::new();
+            for (key, _) in engine.range_streaming(Unbounded, Unbounded) {
+                if glob_match(&pattern, &key) {
+                    if keys.len() >= KEYS_RESULT_LIMIT {
+                        return encode_error("ERR KEYS result exceeds limit (10000)");
+                    }
+                    keys.push(key);
+                }
+            }
             encode_string_array(&keys)
         }
 
         "DBSIZE" => {
-            use std::ops::Bound::Unbounded;
-            let count = engine.range(Unbounded, Unbounded).len();
-            encode_integer(count as i64)
+            let count = engine.total_keys() as i64;
+            encode_integer(count)
         }
 
         "INCR" => {
@@ -921,6 +1044,104 @@ async fn execute_command(args: &[Vec<u8>], engine: &SharedEngine) -> Vec<u8> {
             match engine.put(key, new_value.to_string()) {
                 Ok(_) => encode_integer(new_value),
                 Err(e) => encode_error(&format!("ERR {}", e)),
+            }
+        }
+
+        "EXPIRE" => {
+            if args.len() < 3 {
+                return encode_error("ERR wrong number of arguments for 'expire' command");
+            }
+            let key = match bytes_to_string(&args[1]) {
+                Ok(s) => s,
+                Err(_) => return encode_error("ERR invalid UTF-8 in key"),
+            };
+            let seconds: u64 = match bytes_to_string(&args[2]).ok().and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => return encode_error("ERR value is not an integer or out of range"),
+            };
+
+            if engine.get(&key).is_none() {
+                encode_integer(0)
+            } else if engine.expire(&key, Duration::from_secs(seconds)) {
+                encode_integer(1)
+            } else {
+                encode_integer(0)
+            }
+        }
+
+        "PEXPIRE" => {
+            if args.len() < 3 {
+                return encode_error("ERR wrong number of arguments for 'pexpire' command");
+            }
+            let key = match bytes_to_string(&args[1]) {
+                Ok(s) => s,
+                Err(_) => return encode_error("ERR invalid UTF-8 in key"),
+            };
+            let millis: u64 = match bytes_to_string(&args[2]).ok().and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => return encode_error("ERR value is not an integer or out of range"),
+            };
+
+            if engine.get(&key).is_none() {
+                encode_integer(0)
+            } else if engine.expire(&key, Duration::from_millis(millis)) {
+                encode_integer(1)
+            } else {
+                encode_integer(0)
+            }
+        }
+
+        "TTL" => {
+            if args.len() < 2 {
+                return encode_error("ERR wrong number of arguments for 'ttl' command");
+            }
+            let key = match bytes_to_string(&args[1]) {
+                Ok(s) => s,
+                Err(_) => return encode_error("ERR invalid UTF-8 in key"),
+            };
+
+            if engine.get(&key).is_none() {
+                return encode_integer(-2);
+            }
+            match engine.ttl(&key) {
+                Some(dur) => encode_integer(dur.as_secs() as i64),
+                None => encode_integer(-1),
+            }
+        }
+
+        "PTTL" => {
+            if args.len() < 2 {
+                return encode_error("ERR wrong number of arguments for 'pttl' command");
+            }
+            let key = match bytes_to_string(&args[1]) {
+                Ok(s) => s,
+                Err(_) => return encode_error("ERR invalid UTF-8 in key"),
+            };
+
+            if engine.get(&key).is_none() {
+                return encode_integer(-2);
+            }
+            match engine.ttl(&key) {
+                Some(dur) => encode_integer(dur.as_millis() as i64),
+                None => encode_integer(-1),
+            }
+        }
+
+        "PERSIST" => {
+            if args.len() < 2 {
+                return encode_error("ERR wrong number of arguments for 'persist' command");
+            }
+            let key = match bytes_to_string(&args[1]) {
+                Ok(s) => s,
+                Err(_) => return encode_error("ERR invalid UTF-8 in key"),
+            };
+
+            if engine.get(&key).is_none() {
+                encode_integer(0)
+            } else if engine.persist(&key) {
+                encode_integer(1)
+            } else {
+                encode_integer(0)
             }
         }
 
@@ -1045,13 +1266,50 @@ fn encode_string_array(items: &[String]) -> Vec<u8> {
     result
 }
 
+/// Simple glob matcher supporting '*' and '?' wildcards (ASCII-oriented).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p = pattern.as_bytes();
+    let t = text.as_bytes();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut match_after_star: usize = 0;
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == b'*' {
+            star = Some(pi);
+            match_after_star = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            match_after_star += 1;
+            ti = match_after_star;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+
+    pi == p.len()
+}
+
 // === Transaction Support ===
 
-async fn execute_transaction(commands: &[Vec<Vec<u8>>], engine: &SharedEngine) -> Vec<Vec<u8>> {
+async fn execute_transaction(
+    commands: &[Vec<Vec<u8>>],
+    engine: &SharedEngine,
+    txn_lock: Arc<Mutex<()>>,
+) -> Vec<Vec<u8>> {
+    // Global transaction mutex to serialize EXEC blocks across clients
+    let _guard = txn_lock.lock().await;
     let mut results = Vec::new();
 
     // Execute all commands sequentially
-    // TODO: Make this truly atomic with 2PL or MVCC
     for command in commands {
         let result = execute_command(command, engine).await;
         results.push(result);

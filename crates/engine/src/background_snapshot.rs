@@ -171,6 +171,7 @@ impl BackgroundSnapshotter {
         let start = std::time::Instant::now();
         let entries = engine.export_entries();
         let tags = engine.export_tags();
+        let ttls = engine.export_ttls();
         let clone_duration = start.elapsed();
 
         eprintln!(
@@ -187,7 +188,14 @@ impl BackgroundSnapshotter {
         };
 
         let start = std::time::Instant::now();
-        write_snapshot(snapshot_path, snapshot_options.clone(), meta, entries, tags)?;
+        write_snapshot(
+            snapshot_path,
+            snapshot_options.clone(),
+            meta,
+            entries,
+            tags,
+            ttls,
+        )?;
         let write_duration = start.elapsed();
 
         eprintln!("[snapshotter] wrote to disk in {:?}", write_duration);

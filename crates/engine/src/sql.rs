@@ -25,6 +25,11 @@ pub enum SqlValue {
     Null,
 }
 
+struct KeyRange<K> {
+    lower: Option<(K, bool)>, // (value, exclusive?)
+    upper: Option<(K, bool)>,
+}
+
 impl fmt::Display for SqlValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -140,89 +145,98 @@ where
         // Get data based on WHERE clause
         let mut rows = Vec::new();
 
+        // Default iterator is full ordered scan
+        let mut candidate_rows: Box<dyn Iterator<Item = (K, V)>> = Box::new(
+            engine
+                .range(Bound::Unbounded, Bound::Unbounded)
+                .into_iter()
+                .map(|(k, v)| (k, v)),
+        );
+
         if let Some(expr) = where_clause {
             // Parse WHERE clause
             let filter = Self::parse_where_clause(expr)?;
 
+            // Prefer a bounded key range when possible
+            if let Some(key_range) = Self::derive_key_range(&filter)? {
+                let lower_ref = match &key_range.lower {
+                    Some((k, true)) => Bound::Excluded(k),
+                    Some((k, false)) => Bound::Included(k),
+                    None => Bound::Unbounded,
+                };
+                let upper_ref = match &key_range.upper {
+                    Some((k, true)) => Bound::Excluded(k),
+                    Some((k, false)) => Bound::Included(k),
+                    None => Bound::Unbounded,
+                };
+                candidate_rows = Box::new(engine.range(lower_ref, upper_ref).into_iter());
+            }
+
             match filter {
-                WhereFilter::EqualsField(field, val) => {
-                    match field {
-                        Field::Key => {
-                            let key = Self::parse_key(&val)?;
+                WhereFilter::EqualsField(field, val) => match field {
+                    Field::Key => {
+                        let key = Self::parse_key(&val)?;
+                        if let Some(value) = engine.get(&key) {
+                            rows.push(Self::format_row(&key, &value, &projection)?);
+                        }
+                    }
+                    Field::Value => {
+                        let matches = engine.find_by_value(&val);
+                        for (k, v) in matches {
+                            rows.push(Self::format_row(&k, &v, &projection)?);
+                        }
+                    }
+                },
+                WhereFilter::LikeField(field, pattern) => match field {
+                    Field::Key => {
+                        for (k, v) in candidate_rows {
+                            let key_str = format!("{}", k);
+                            if Self::matches_like_pattern(&key_str, &pattern) {
+                                rows.push(Self::format_row(&k, &v, &projection)?);
+                            }
+                        }
+                    }
+                    Field::Value => {
+                        let matches = engine.find_by_value_like(&pattern);
+                        for (k, v) in matches {
+                            rows.push(Self::format_row(&k, &v, &projection)?);
+                        }
+                    }
+                },
+                WhereFilter::InField(field, values) => match field {
+                    Field::Key => {
+                        for value_str in values {
+                            let key = Self::parse_key(&value_str)?;
                             if let Some(value) = engine.get(&key) {
                                 rows.push(Self::format_row(&key, &value, &projection)?);
                             }
                         }
-                        Field::Value => {
-                            // Use secondary index if available to avoid full scan
-                            let matches = engine.find_by_value(&val);
+                    }
+                    Field::Value => {
+                        for value_str in values {
+                            let matches = engine.find_by_value(&value_str);
                             for (k, v) in matches {
                                 rows.push(Self::format_row(&k, &v, &projection)?);
                             }
                         }
                     }
-                }
-                WhereFilter::LikeField(field, pattern) => {
-                    match field {
-                        Field::Key => {
-                            // still need to scan keys (no key index here besides ordered tree)
-                            let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-                            for (k, v) in all_results {
-                                let key_str = format!("{}", k);
-                                if Self::matches_like_pattern(&key_str, &pattern) {
-                                    rows.push(Self::format_row(&k, &v, &projection)?);
-                                }
-                            }
-                        }
-                        Field::Value => {
-                            // Use secondary index and pattern match against normalized value keys
-                            let matches = engine.find_by_value_like(&pattern);
-                            for (k, v) in matches {
-                                rows.push(Self::format_row(&k, &v, &projection)?);
-                            }
-                        }
-                    }
-                }
-                WhereFilter::InField(field, values) => {
-                    match field {
-                        Field::Key => {
-                            for value_str in values {
-                                let key = Self::parse_key(&value_str)?;
-                                if let Some(value) = engine.get(&key) {
-                                    rows.push(Self::format_row(&key, &value, &projection)?);
-                                }
-                            }
-                        }
-                        Field::Value => {
-                            // Use the secondary index for equality IN values
-                            for value_str in values {
-                                let matches = engine.find_by_value(&value_str);
-                                for (k, v) in matches {
-                                    rows.push(Self::format_row(&k, &v, &projection)?);
-                                }
-                            }
-                        }
-                    }
-                }
+                },
                 WhereFilter::Not(inner) => {
-                    let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-                    for (k, v) in all_results {
+                    for (k, v) in candidate_rows {
                         if !Self::matches_single_filter(&k, &v, &*inner) {
                             rows.push(Self::format_row(&k, &v, &projection)?);
                         }
                     }
                 }
                 WhereFilter::And(filters) => {
-                    let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-                    for (k, v) in all_results {
+                    for (k, v) in candidate_rows {
                         if Self::matches_all_filters(&k, &v, &filters) {
                             rows.push(Self::format_row(&k, &v, &projection)?);
                         }
                     }
                 }
                 WhereFilter::Or(filters) => {
-                    let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-                    for (k, v) in all_results {
+                    for (k, v) in candidate_rows {
                         if Self::matches_any_filter(&k, &v, &filters) {
                             rows.push(Self::format_row(&k, &v, &projection)?);
                         }
@@ -230,17 +244,12 @@ where
                 }
                 WhereFilter::RangeField(field, start, end) => match field {
                     Field::Key => {
-                        let start_key = Self::parse_key(&start)?;
-                        let end_key = Self::parse_key(&end)?;
-                        let results =
-                            engine.range(Bound::Included(&start_key), Bound::Included(&end_key));
-                        for (k, v) in results {
+                        for (k, v) in candidate_rows {
                             rows.push(Self::format_row(&k, &v, &projection)?);
                         }
                     }
                     Field::Value => {
-                        let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-                        for (k, v) in all_results {
+                        for (k, v) in candidate_rows {
                             let vt = Self::value_to_text(&v);
                             if vt >= start && vt <= end {
                                 rows.push(Self::format_row(&k, &v, &projection)?);
@@ -250,15 +259,12 @@ where
                 },
                 WhereFilter::GreaterThanField(field, val) => match field {
                     Field::Key => {
-                        let key = Self::parse_key(&val)?;
-                        let results = engine.range(Bound::Excluded(&key), Bound::Unbounded);
-                        for (k, v) in results {
+                        for (k, v) in candidate_rows {
                             rows.push(Self::format_row(&k, &v, &projection)?);
                         }
                     }
                     Field::Value => {
-                        let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-                        for (k, v) in all_results {
+                        for (k, v) in candidate_rows {
                             if Self::value_to_text(&v) > val {
                                 rows.push(Self::format_row(&k, &v, &projection)?);
                             }
@@ -267,15 +273,12 @@ where
                 },
                 WhereFilter::LessThanField(field, val) => match field {
                     Field::Key => {
-                        let key = Self::parse_key(&val)?;
-                        let results = engine.range(Bound::Unbounded, Bound::Excluded(&key));
-                        for (k, v) in results {
+                        for (k, v) in candidate_rows {
                             rows.push(Self::format_row(&k, &v, &projection)?);
                         }
                     }
                     Field::Value => {
-                        let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-                        for (k, v) in all_results {
+                        for (k, v) in candidate_rows {
                             if Self::value_to_text(&v) < val {
                                 rows.push(Self::format_row(&k, &v, &projection)?);
                             }
@@ -283,17 +286,13 @@ where
                     }
                 },
                 WhereFilter::All => {
-                    let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-                    for (k, v) in all_results {
+                    for (k, v) in candidate_rows {
                         rows.push(Self::format_row(&k, &v, &projection)?);
                     }
                 }
             }
         } else {
-            // No WHERE clause - full scan
-            let all_results = engine.range(Bound::Unbounded, Bound::Unbounded);
-
-            for (k, v) in all_results {
+            for (k, v) in candidate_rows {
                 rows.push(Self::format_row(&k, &v, &projection)?);
             }
         }
@@ -1186,7 +1185,99 @@ where
             .any(|filter| Self::matches_single_filter(key, value, filter))
     }
 
-    /// Normalize a stored value into a plain text representation for LIKE/comparison
+    /// Infer a key range for the WHERE filter to drive ordered scans.
+    fn derive_key_range(filter: &WhereFilter) -> Result<Option<KeyRange<K>>, String> {
+        fn merge_lower<K: Ord + Clone>(
+            a: Option<(K, bool)>,
+            b: Option<(K, bool)>,
+        ) -> Option<(K, bool)> {
+            match (a, b) {
+                (None, other) | (other, None) => other,
+                (Some((av, a_excl)), Some((bv, b_excl))) => {
+                    if av > bv {
+                        Some((av, a_excl))
+                    } else if bv > av {
+                        Some((bv, b_excl))
+                    } else {
+                        Some((av, a_excl || b_excl))
+                    }
+                }
+            }
+        }
+
+        fn merge_upper<K: Ord + Clone>(
+            a: Option<(K, bool)>,
+            b: Option<(K, bool)>,
+        ) -> Option<(K, bool)> {
+            match (a, b) {
+                (None, other) | (other, None) => other,
+                (Some((av, a_excl)), Some((bv, b_excl))) => {
+                    if av < bv {
+                        Some((av, a_excl))
+                    } else if bv < av {
+                        Some((bv, b_excl))
+                    } else {
+                        Some((av, a_excl || b_excl))
+                    }
+                }
+            }
+        }
+
+        fn is_valid<K: Ord>(lower: &Option<(K, bool)>, upper: &Option<(K, bool)>) -> bool {
+            match (lower, upper) {
+                (Some((lv, l_excl)), Some((uv, u_excl))) => {
+                    if lv < uv {
+                        true
+                    } else if lv == uv {
+                        !l_excl && !u_excl
+                    } else {
+                        false
+                    }
+                }
+                _ => true,
+            }
+        }
+
+        let mut range = KeyRange { lower: None, upper: None };
+
+        match filter {
+            WhereFilter::EqualsField(Field::Key, val) => {
+                let key = Self::parse_key(val)?;
+                range.lower = Some((key.clone(), false));
+                range.upper = Some((key, false));
+            }
+            WhereFilter::RangeField(Field::Key, start, end) => {
+                range.lower = Some((Self::parse_key(start)?, false));
+                range.upper = Some((Self::parse_key(end)?, false));
+            }
+            WhereFilter::GreaterThanField(Field::Key, val) => {
+                range.lower = Some((Self::parse_key(val)?, true));
+            }
+            WhereFilter::LessThanField(Field::Key, val) => {
+                range.upper = Some((Self::parse_key(val)?, true));
+            }
+            WhereFilter::And(filters) => {
+                for f in filters {
+                    if let Some(sub_range) = Self::derive_key_range(f)? {
+                        range.lower = merge_lower(range.lower.take(), sub_range.lower);
+                        range.upper = merge_upper(range.upper.take(), sub_range.upper);
+                        if !is_valid(&range.lower, &range.upper) {
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+            _ => return Ok(None),
+        }
+
+        if !is_valid(&range.lower, &range.upper) {
+            return Ok(None);
+        }
+
+        Ok(Some(range))
+    }
+
+/// Normalize a stored value into a plain text representation for LIKE/comparison
     fn value_to_text(value: &V) -> String {
         // First try to convert the value to a serde_json::Value
         if let Ok(vjson) = serde_json::to_value(value) {

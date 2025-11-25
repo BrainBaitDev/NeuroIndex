@@ -2,13 +2,13 @@ Package: neuroindex
 Version: 0.1.0-1
 Architecture: amd64
 Maintainer: BrainBaitDev antonio@brainbait.it
-Installed-Size: 18266
-Depends: libc6 (>= 2.34)
+Installed-Size: 18581
+Depends: libc6 (>= 2.34), libc6 (>= 2.39)
 Filename: pool/main/neuroindex_0.1.0-1_amd64.deb
-Size: 4099076
-MD5sum: 38ba5ebd0d492db02d8d9fb102885925
-SHA1: f41f17b7cb7accc186f3c9f14f5d0d51eb61fd79
-SHA256: 6b4eaf8e542ec61437fc452e77f76d4a3da05b3c9e0e72d598bec425a2661d71
+Size: 4210288
+MD5sum: 425e193eef66f941a5db9bbcaa44c010
+SHA1: 0a4b6b94f72bc5c95fe08f287f7a50ad5dc010ca
+SHA256: e351b701ae3aa56a0827e01def192da6cb6bca0c3983e74cded059be299fa5bf
 Section: database
 Priority: optional
 Homepage: https://github.com/BrainBaitDev/NeuroIndex

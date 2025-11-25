@@ -103,6 +103,10 @@ struct Args {
     /// Authentication token (Bearer token for API access)
     #[arg(long)]
     auth_token: Option<String>,
+
+    /// Interval (ms) for TTL background cleanup (0 to disable)
+    #[arg(long, default_value = "1000")]
+    ttl_cleanup_interval_ms: u64,
 }
 
 #[tokio::main]
@@ -162,8 +166,9 @@ async fn main() {
         );
 
         match Engine::recover(config.clone()) {
-            Ok(engine) => {
+            Ok(mut engine) => {
                 info!("Successfully recovered engine from persistence");
+                engine.enable_ttl();
                 Arc::new(engine)
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -171,10 +176,11 @@ async fn main() {
                     "No existing persistence state (wal: {:?}, snapshot: {:?}). Starting fresh.",
                     wal_path, snapshot_path
                 );
-                let engine = Engine::with_persistence(config).unwrap_or_else(|e| {
+                let mut engine = Engine::with_persistence(config).unwrap_or_else(|e| {
                     eprintln!("Failed to initialize engine with persistence: {}", e);
                     std::process::exit(1);
                 });
+                engine.enable_ttl();
                 Arc::new(engine)
             }
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
@@ -197,10 +203,11 @@ async fn main() {
                         info!("Removed incomplete snapshot {:?}", snapshot_path);
                     }
                 }
-                let engine = Engine::with_persistence(config).unwrap_or_else(|e| {
+                let mut engine = Engine::with_persistence(config).unwrap_or_else(|e| {
                     eprintln!("Failed to initialize engine with persistence: {}", e);
                     std::process::exit(1);
                 });
+                engine.enable_ttl();
                 Arc::new(engine)
             }
             Err(err) => {
@@ -209,7 +216,9 @@ async fn main() {
             }
         }
     } else {
-        Arc::new(Engine::with_shards(args.shards, args.capacity))
+        let mut engine = Engine::with_shards(args.shards, args.capacity);
+        engine.enable_ttl();
+        Arc::new(engine)
     };
 
     let limits = ResourceLimits::new(
@@ -251,6 +260,10 @@ async fn main() {
         .route("/api/v1/records/:key", get(get_record))
         .route("/api/v1/records/:key", post(put_record))
         .route("/api/v1/records/:key", delete(delete_record))
+        // TTL operations
+        .route("/api/v1/ttl/:key", get(get_ttl))
+        .route("/api/v1/ttl/:key", post(set_ttl))
+        .route("/api/v1/ttl/:key", delete(clear_ttl))
         // Bulk operations
         .route("/api/v1/records/bulk", post(bulk_insert))
         // Range queries
@@ -350,6 +363,29 @@ async fn main() {
     info!("Press Ctrl+C to stop");
     info!("");
 
+    // Start TTL background cleanup
+    let ttl_cleanup_handle = if args.ttl_cleanup_interval_ms > 0 {
+        info!(
+            "Starting TTL cleanup worker every {} ms",
+            args.ttl_cleanup_interval_ms
+        );
+        let engine_for_ttl = Arc::clone(&engine);
+        let interval_ms = args.ttl_cleanup_interval_ms;
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            loop {
+                interval.tick().await;
+                let removed = engine_for_ttl.cleanup_expired_keys();
+                if removed > 0 {
+                    info!("TTL cleanup removed {} expired keys", removed);
+                }
+            }
+        }))
+    } else {
+        info!("TTL cleanup worker disabled");
+        None
+    };
+
     // Start background snapshots if enabled
     let snapshot_handle = if args.snapshot_interval > 0 && args.persistence_dir.is_some() {
         info!(
@@ -422,9 +458,13 @@ async fn main() {
         }
     }
 
-    // Stop background snapshots cleanly
+    // Stop background tasks cleanly
     if let Some(handle) = snapshot_handle {
         info!("Stopping background snapshot worker...");
+        handle.abort();
+    }
+    if let Some(handle) = ttl_cleanup_handle {
+        info!("Stopping TTL cleanup worker...");
         handle.abort();
     }
 }
@@ -491,6 +531,7 @@ async fn root() -> Json<RootResponse> {
             "/api/v1/records/bulk".to_string(),
             "/api/v1/records/range".to_string(),
             "/api/v1/aggregations/count".to_string(),
+            "/api/v1/ttl/{key}".to_string(),
         ],
         documentation: "See CLIENT_USAGE.md for complete API documentation".to_string(),
     })
@@ -543,6 +584,68 @@ async fn delete_record(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// === TTL Handlers ===
+
+fn duration_from_ttl_request(req: &TtlRequest) -> Result<Duration, ApiError> {
+    if let Some(ms) = req.ttl_ms {
+        Ok(Duration::from_millis(ms))
+    } else if let Some(sec) = req.ttl_seconds {
+        Ok(Duration::from_secs(sec))
+    } else {
+        Err(ApiError::BadRequest(
+            "ttl_ms or ttl_seconds is required".to_string(),
+        ))
+    }
+}
+
+async fn get_ttl(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<TtlResponse>, ApiError> {
+    let exists = state.engine.get(&key).is_some();
+    if !exists {
+        return Err(ApiError::NotFound);
+    }
+
+    let ttl_ms = match state.engine.ttl(&key) {
+        Some(duration) => duration.as_millis() as i64,
+        None => -1,
+    };
+
+    Ok(Json(TtlResponse { key, ttl_ms }))
+}
+
+async fn set_ttl(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Json(payload): Json<TtlRequest>,
+) -> Result<Json<TtlResponse>, ApiError> {
+    let duration = duration_from_ttl_request(&payload)?;
+    if !state.engine.expire(&key, duration) {
+        return Err(ApiError::NotFound);
+    }
+
+    Ok(Json(TtlResponse {
+        key,
+        ttl_ms: duration.as_millis() as i64,
+    }))
+}
+
+async fn clear_ttl(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<TtlResponse>, ApiError> {
+    if state.engine.get(&key).is_none() {
+        return Err(ApiError::NotFound);
+    }
+
+    state.engine.persist(&key);
+    Ok(Json(TtlResponse {
+        key,
+        ttl_ms: -1,
+    }))
 }
 
 // === Bulk Insert Handler ===
@@ -710,6 +813,12 @@ struct PutRequest {
     value: serde_json::Value,
 }
 
+#[derive(Deserialize)]
+struct TtlRequest {
+    ttl_ms: Option<u64>,
+    ttl_seconds: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct PutResponse {
     key: String,
@@ -743,6 +852,12 @@ struct BulkInsertResponse {
 struct BulkError {
     key: String,
     error: String,
+}
+
+#[derive(Serialize)]
+struct TtlResponse {
+    key: String,
+    ttl_ms: i64,
 }
 
 #[derive(Deserialize)]
@@ -812,6 +927,7 @@ fn matches_username_filter(value: &serde_json::Value, username_contains: Option<
 
 enum ApiError {
     NotFound,
+    BadRequest(String),
     Internal(String),
 }
 
@@ -819,6 +935,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "Record not found".to_string()),
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
 
@@ -927,4 +1044,90 @@ async fn memory_limit_middleware(
     }
 
     next.run(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::Client;
+    use serde_json::json;
+    use tokio::net::TcpListener;
+
+    /// Minimal HTTP smoke test with concurrent PUT/GET.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_server_handles_concurrent_put_get() {
+        let mut engine = Engine::with_shards(4, 1 << 6);
+        engine.enable_ttl();
+        let engine = Arc::new(engine);
+
+        let app_state = AppState {
+            engine: Arc::clone(&engine),
+            shards: 4,
+            capacity: 1 << 6,
+            start_time: Instant::now(),
+            metrics: metrics::MetricsCollector::new(),
+            limits: ResourceLimits::new(None, None, 5), // 5 MB
+            auth_token: None,
+        };
+
+        let app = Router::new()
+            .route("/api/v1/records/:key", get(get_record))
+            .route("/api/v1/records/:key", post(put_record))
+            .with_state(app_state.clone())
+            .layer(CorsLayer::permissive())
+            .layer(TraceLayer::new_for_http())
+            .layer(middleware::from_fn_with_state(
+                app_state.clone(),
+                auth_middleware,
+            ))
+            .layer(middleware::from_fn_with_state(
+                app_state.clone(),
+                memory_limit_middleware,
+            ));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = axum::serve(listener, app.into_make_service());
+        let server_handle = tokio::spawn(async move {
+            let _ = server.await;
+        });
+
+        // concurrent PUTs
+        let clients = 6;
+        let mut handles = Vec::new();
+        for i in 0..clients {
+            let uri = format!("http://{}:{}/api/v1/records/key{}", addr.ip(), addr.port(), i);
+            handles.push(tokio::spawn(async move {
+                let payload = json!({ "value": format!("v{}", i) }).to_string();
+                let client = Client::new();
+                let resp = client
+                    .post(&uri)
+                    .header("content-type", "application/json")
+                    .body(payload)
+                    .send()
+                    .await
+                    .unwrap();
+                assert!(resp.status().is_success(), "PUT failed: {}", resp.status());
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // GET and validate
+        for i in 0..clients {
+            let uri = format!("http://{}:{}/api/v1/records/key{}", addr.ip(), addr.port(), i);
+            let client = Client::new();
+            let resp = client.get(&uri).send().await.unwrap();
+            assert!(resp.status().is_success());
+            let text = resp.text().await.unwrap();
+            assert!(
+                text.contains(&format!("\"key\":\"key{}\"", i)) && text.contains(&format!("\"v{}\"", i)),
+                "unexpected body: {}",
+                text
+            );
+        }
+
+        server_handle.abort();
+    }
 }

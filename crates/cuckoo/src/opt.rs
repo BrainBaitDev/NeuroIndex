@@ -6,7 +6,22 @@ use crate::simd;
 impl<V: Clone, S: BuildHasher + Clone + Default> CuckooTable<u64, V, S> {
     /// SIMD-optimized get for u64 keys
     pub fn get_u64_fast(&self, key: &u64) -> Option<V> {
-        let t = self.read();
+        // 1. Check primary table
+        let t = self.read_table();
+        if let Some(v) = Self::get_u64_in_table(&t, key) {
+            return Some(v);
+        }
+
+        // 2. Check old table if resizing
+        if let Some(old) = self.read_old_table() {
+            if let Some(v) = Self::get_u64_in_table(&old, key) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    fn get_u64_in_table(t: &Table<u64, V, S>, key: &u64) -> Option<V> {
         let i1 = t.h1(key);
         let i2 = t.h2(key);
 
@@ -106,7 +121,22 @@ impl<V: Clone, S: BuildHasher + Clone + Default> CuckooTable<u64, V, S> {
 /// Optimized implementation for u32 keys
 impl<V: Clone, S: BuildHasher + Clone + Default> CuckooTable<u32, V, S> {
     pub fn get_u32_fast(&self, key: &u32) -> Option<V> {
-        let t = self.read();
+        // 1. Check primary table
+        let t = self.read_table();
+        if let Some(v) = Self::get_u32_in_table(&t, key) {
+            return Some(v);
+        }
+
+        // 2. Check old table if resizing
+        if let Some(old) = self.read_old_table() {
+            if let Some(v) = Self::get_u32_in_table(&old, key) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    fn get_u32_in_table(t: &Table<u32, V, S>, key: &u32) -> Option<V> {
         let i1 = t.h1(key);
         let i2 = t.h2(key);
 
