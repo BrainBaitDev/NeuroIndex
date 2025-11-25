@@ -56,7 +56,15 @@ execute demo.sh
 echo "deb [trusted=yes] https://brainbaitdev.github.io/NeuroIndex/debian stable main" | sudo tee /etc/apt/sources.list.d/neuroindex.list
 sudo apt update
 sudo apt install neuroindex
+
+#Start resp server
+sudo systemctl start neuroindex-resp
+
+#Start http server
+sudo systemctl start neuroindex-http
  ```
+
+
 
 ##  Manual Installation
 
