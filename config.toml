@@ -3,7 +3,7 @@
 
 [server]
 # RESP protocol port (Redis-compatible)
-port = 6379
+port = 6381
 
 # HTTP REST API port
 http_port = 8080
