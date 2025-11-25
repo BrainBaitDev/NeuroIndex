@@ -2,15 +2,13 @@
   <img width="496" height="312" alt="logo_neuro_index" src="https://github.com/user-attachments/assets/875d11e0-aa42-4086-8f18-c298eeb0998e" />
 </div>
 
+<div align="center">
 
-# INDICE
-- [NEUROINDEX](#center-neuroindex-center)
-  - [TECNOLOGIE](#tecnologie)
-  - [MOTIVAZIONE E OBIETTIVI](#motivazione-e-obiettivi)
-  - [FEATURE CHIAVE](#feature-chiave)
-  - [SCHEMA ARCHITETTURALE AD ALTO LIVELLO](#schema-architetturale-ad-alto-livello)
-  - [PERFORMACE E METRICHE](#performace-e-metriche)
-  - 
+[🚀 Quick Start](https://github.com/BrainBaitDev/NeuroIndex/blob/main/docs/QUICK_START.md) • [📖 Docs](https://github.com/BrainBaitDev/NeuroIndex/blob/main/docs) 
+
+</div>
+
+
  # <center>NEUROINDEX </center>
  
 NeuroIndex è un motore di database in-memory di nuova generazione progettato per offrire prestazioni elevate, scalabilità orizzontale e robustezza lock-free.

@@ -2,14 +2,11 @@
   <img width="496" height="312" alt="logo_neuro_index" src="https://github.com/user-attachments/assets/875d11e0-aa42-4086-8f18-c298eeb0998e" />
 </div>
 
- # INDEX
- - [NEUROINDEX](#center-neuroindex-center)
-  - [TECHNOLOGIES](#technologies)
-  - [PERFORMANCE AND METRICS](#performance-and-metrics)
-  - [KEY FEATURES](#key-features)
-  - [HIGH-LEVEL ARCHITECTURAL DIAGRAM](#high-level-architectural-diagram)
-  - [PERFORMANCE AND METRICS](#performance-and-metrics)
+<div align="center">
 
+[🚀 Quick Start](https://github.com/BrainBaitDev/NeuroIndex/blob/main/docs/QUICK_START.md) • [📖 Docs](https://github.com/BrainBaitDev/NeuroIndex/blob/main/docs) 
+
+</div>
  
  # <center>NEUROINDEX </center>
 
