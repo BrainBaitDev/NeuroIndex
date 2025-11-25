@@ -2,17 +2,15 @@
   <img width="496" height="312" alt="logo_neuro_index" src="https://github.com/user-attachments/assets/875d11e0-aa42-4086-8f18-c298eeb0998e" />
 </div>
 
-
+<div align="center">
 
 [🚀 Quick Start](https://github.com/BrainBaitDev/NeuroIndex/blob/main/docs/QUICK_START.md) • [📖 Docs](https://github.com/BrainBaitDev/NeuroIndex/blob/main/docs) 
 
 
-
-<div align="center">
-
 NeuroIndex is an in-memory database engine written in Rust, designed to deliver extreme performance (<200ns per GET) and multi-platform compatibility (Rust API, REST, Redis protocol, gRPC).
 
 </div>
+
 ## Key Features
 <table align="center">
     <tr>
