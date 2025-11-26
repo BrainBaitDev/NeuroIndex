@@ -123,7 +123,7 @@ Le operazioni di persistenza vengono garantite da un modulo dedicato che gestisc
 5. La risposta viene restituita al client.
 
 
-![CLIENT  API -1-](assets/CLIENT%20%20API%20-1-.png)
+![CLIENT  API](CLIENT%20%20API.png)
 Questa architettura garantisce alta efficienza, resilienza ai guasti e capacità di scalare dinamicamente in base alle esigenze dell’applicazione.
 
 ## PERFORMACE E METRICHE

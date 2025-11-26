@@ -42,10 +42,7 @@ A livello di memoria, ogni shard allocca i valori in una arena dedicata, minimiz
 Questa stratificazione di indici specializzati permette a NeuroIndex di rispondere efficientemente a un’ampia gamma di query (lookup, aggregazioni, ricerche per prefisso e tag) mantenendo la concorrenza senza lock, e supportando operazioni di persistenza (WAL, snapshot) e recovery robusta. 
 L’intera architettura è progettata per adattarsi dinamicamente al carico e scalare sia in ambienti standalone che cluster distribuiti
 
-
-![](assets/17635434849834.jpg)
-
-
+![CLIENT  API](CLIENT%20%20API.png)
 
 ## 1. Struttura di uno shard
 Uno Shard rappresenta una partizione indipendente del datastore, progettata per lavorare in parallelo con altri shard, sfruttando la concorrenza multi-core e incrementando la scalabilità e l’efficienza del database.

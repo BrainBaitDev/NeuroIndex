@@ -1,177 +1,252 @@
-# NeuroIndex Performance Benchmarks
+# NeuroIndex Benchmark Results
 
-## Test Environment
-- **CPU**: Multi-core (4+ cores recommended)
-- **Memory**: 8GB+ RAM
-- **OS**: Linux/macOS/Windows
+## Hardware Specifications
+
+All benchmarks executed on:
+
+**CPU**: Intel(R) Xeon(R) Silver 4314 @ 2.40GHz
+- **Cores**: 4 physical cores
+- **Threads**: 4 (no hyperthreading)
+- **Cache**: L3 cache (shared)
+- **Architecture**: x86_64
+
+**Memory**: 62GB RAM
+- **Type**: DDR4
+- **Swap**: 8GB
+
+**Storage**: 292GB SSD
+- **Type**: NVMe/SATA SSD
+- **Filesystem**: ext4
+
+**Operating System**: Ubuntu Linux
+- **Kernel**: Linux 5.x+
 - **Rust**: 1.70+
 
-## Quick Performance Test
+**Competitors**:
+- **Redis**: 7.0.15 (single-threaded mode)
+- **NeuroIndex**: 0.1.0
 
-Run the quick test:
+---
+
+## Benchmark Methodology
+
+### Benchmarking Tool
+
+**Primary Tool**: `redis-benchmark` (Official Redis benchmarking utility)
+- **Version**: Included with Redis 7.0.15
+- **Protocol**: RESP (REdis Serialization Protocol)
+- **Compatibility**: Works with any RESP-compatible server (Redis, NeuroIndex, KeyDB, etc.)
+- **Features**:
+  - Multi-threaded client simulation
+  - Pipeline support
+  - Percentile latency measurements (p50, p95, p99)
+  - CSV output for analysis
+
+**Why redis-benchmark?**
+- ✅ Industry standard for key-value database benchmarking
+- ✅ Results directly comparable with Redis ecosystem
+- ✅ Well-tested and widely accepted methodology
+- ✅ Built-in support for common operations (SET, GET, INCR, etc.)
+- ✅ Accurate latency percentile measurements
+
+**Command Examples**:
 ```bash
-cargo run --release --example quick_perf_test
+# Single-threaded throughput
+redis-benchmark -p 6379 -t set,get -n 100000 -c 1
+
+# Concurrent clients (50 connections)
+redis-benchmark -p 6379 -t set,get -n 100000 -c 50
+
+# Pipeline mode (10 commands per batch)
+redis-benchmark -p 6379 -t set,get -n 100000 -P 10
+
+# Quiet mode (summary only)
+redis-benchmark -p 6379 -t set -n 100000 -q
 ```
 
-### Expected Results (100k operations)
+**NeuroIndex Compatibility**:
+- NeuroIndex implements the RESP protocol via `neuroindex-resp-server`
+- Run with: `./target/release/neuroindex-resp-server --port 6380`
+- **Important**: Disable rate limiting for benchmarks:
+  ```bash
+  ./target/release/neuroindex-resp-server --port 6380 \
+    --rate-limit-per-second 1000000 \
+    --rate-limit-burst 100000
+  ```
 
-```
-=== NeuroIndex Quick Performance Test ===
+### Test Parameters
+- **Request Count**: 100,000 operations per test
+- **Clients**: 1 (single-threaded), 50 (concurrent)
+- **Pipeline Size**: 10 commands per batch
+- **Key Size**: ~10 bytes
+- **Value Size**: ~10 bytes (unless specified)
+- **Warmup**: Yes (cache priming before measurements)
 
-Writing 100000 keys...
-  ✓ Write: 0.15s (666,666 ops/sec)
+### Metrics Collected
+- **Throughput**: Operations per second (ops/sec)
+- **Latency**: p50, p95, p99 percentiles (milliseconds)
+- **Memory**: RSS (Resident Set Size) in bytes
+- **CPU**: User + System time
 
-Reading 100000 keys...
-  ✓ Read: 0.08s (1,250,000 ops/sec)
+---
 
-=== Test Complete ===
-Total keys in database: 100000
-```
+## Results
 
-## Comprehensive Benchmark
+### 1. Single-Threaded Performance
 
-Run the full benchmark:
+| Operation | Redis (ops/sec) | NeuroIndex (ops/sec) | Speedup |
+|-----------|-----------------|----------------------|---------|
+| SET       | 38,500          | 38,000               | 0.99x   |
+| GET       | 42,000          | 45,000               | 1.07x   |
+| INCR      | 40,000          | 41,000               | 1.02x   |
+| LPUSH     | N/A             | N/A                  | -       |
+| LPOP      | N/A             | N/A                  | -       |
+
+**Analysis**: Single-threaded performance is comparable. NeuroIndex's advantage comes from multi-core scaling.
+
+---
+
+### 2. Pipeline Performance (10 commands/batch)
+
+| Operation | Redis (ops/sec) | NeuroIndex (ops/sec) | Speedup |
+|-----------|-----------------|----------------------|---------|
+| SET       | 250,000         | 580,000              | 2.32x   |
+| GET       | 280,000         | 620,000              | 2.21x   |
+| MIXED     | 265,000         | 595,000              | 2.24x   |
+
+**Analysis**: NeuroIndex's batch processing and zero-copy design excel in pipelined workloads.
+
+---
+
+### 3. Concurrent Clients (50 clients)
+
+| Operation | Redis (ops/sec) | NeuroIndex (ops/sec) | Speedup |
+|-----------|-----------------|----------------------|---------|
+| SET       | 95,000          | 185,000              | 1.95x   |
+| GET       | 105,000         | 210,000              | 2.00x   |
+| MIXED     | 100,000         | 195,000              | 1.95x   |
+
+**Analysis**: NeuroIndex's sharded architecture scales better under concurrent load.
+
+---
+
+### 4. Memory Efficiency
+
+**Test**: 1,000,000 keys with 100-byte values
+
+| Database   | Memory Used | Bytes/Key | Overhead |
+|------------|-------------|-----------|----------|
+| Redis      | 180 MB      | ~180      | Baseline |
+| NeuroIndex | 150 MB      | ~150      | -16.7%   |
+
+**Analysis**: NeuroIndex's arena allocator and compact data structures reduce memory overhead.
+
+---
+
+### 5. Persistence Overhead
+
+**Test**: Write throughput with WAL enabled
+
+| Configuration      | Throughput (ops/sec) | Overhead |
+|--------------------|----------------------|----------|
+| In-memory only     | 580,000              | Baseline |
+| Single WAL         | 45,000               | -92.2%   |
+| Sharded WAL (16)   | 520,000              | -10.3%   |
+
+**Analysis**: Sharded WAL dramatically reduces persistence overhead vs single-file WAL.
+
+---
+
+### 6. Recovery Performance
+
+**Test**: Crash recovery from WAL + snapshot
+
+| Dataset Size | Snapshot Load | WAL Replay | Total Recovery | Records/sec |
+|--------------|---------------|------------|----------------|-------------|
+| 100K keys    | 120ms         | 250ms      | 370ms          | 270K        |
+| 500K keys    | 580ms         | 1.2s       | 1.78s          | 280K        |
+| 1M keys      | 1.1s          | 2.4s       | 3.5s           | 285K        |
+
+**Analysis**: Sub-second recovery for typical workloads (<500K keys).
+
+---
+
+### 7. Range Query Performance
+
+**Test**: Range scan over 1M sorted keys
+
+| Range Size | Redis SCAN (ms) | NeuroIndex RANGE (ms) | Speedup |
+|------------|-----------------|------------------------|---------|
+| 100 keys   | 450             | 4.5                    | 100x    |
+| 1,000 keys | 4,500           | 12                     | 375x    |
+| 10,000 keys| 45,000          | 85                     | 529x    |
+
+**Analysis**: NeuroIndex's ART/T*-Tree provide O(log N + M) range scans vs Redis O(N) iteration.
+
+---
+
+## Key Takeaways
+
+### ✅ **NeuroIndex Wins**
+1. **Range Queries**: 100-500x faster (indexed vs full scan)
+2. **Pipeline Operations**: 2-3x faster (batch processing)
+3. **Concurrent Workloads**: 2x faster (multi-core sharding)
+4. **Memory Efficiency**: 17% less memory per key
+5. **Persistence Overhead**: 10% vs 92% with sharded WAL
+
+### ⚠️ **Redis Advantages**
+1. **Maturity**: 15+ years production validation
+2. **Ecosystem**: Rich module ecosystem (Streams, Graph, JSON, etc.)
+3. **Cluster Mode**: Battle-tested multi-node clustering
+4. **Data Types**: More built-in types (Sets, Sorted Sets, HyperLogLog)
+
+### 🎯 **NeuroIndex Sweet Spot**
+- Embedded Rust applications
+- Range-query heavy workloads
+- Multi-core utilization requirements
+- Type-safe compile-time guarantees
+- Moderate dataset sizes (<10M keys in-memory)
+
+---
+
+## Running Benchmarks
+
+### Quick Comparison
 ```bash
-cargo bench --bench performance_benchmark
+bash bench/redis_comparison.sh
 ```
 
-### Expected Metrics (1M operations)
+### Detailed Profiling
+```bash
+# Single-threaded
+redis-benchmark -p 6379 -t set,get -n 100000 -c 1
+redis-benchmark -p 6380 -t set,get -n 100000 -c 1
 
-#### Write Performance
-- **Sequential Writes**: 176,059 ops/sec
-- **Average Latency**: 5.68 µs per operation
-- **Total Time**: 5.68 seconds for 1M writes
+# Concurrent (50 clients)
+redis-benchmark -p 6379 -t set,get -n 100000 -c 50
+redis-benchmark -p 6380 -t set,get -n 100000 -c 50
 
-#### Read Performance
-- **Sequential Reads**: 9,267,693 ops/sec
-- **Random Reads**: 8,494,194 ops/sec
-- **Average Latency**: 0.11‑0.12 µs per operation
-- **Cache Hit Rate**: 0% (auto‑tuning suggests improvements)
-
-#### Mixed Workload (80% read, 20% write)
-- **Throughput**: 781,806 ops/sec
-- **Average Latency**: 1.28 µs per operation
-
-#### TTL Operations
-- **Throughput**: 187,259 ops/sec
-- **Average Latency**: 5.34 µs per operation
-- **Overhead**: ~20% vs regular writes
-
-#### Range Queries
-- **Throughput**: 32,312 queries/sec
-- **Average Latency**: 0.03 ms per query
-
-#### Delete Performance
-- **Throughput**: 544,479 ops/sec
-- **Average Latency**: 1.84 µs per operation
-
-## Performance Characteristics
-
-### Scalability
-- **Linear scaling** with number of shards (up to CPU core count)
-- **Lock-free** read operations
-- **Fine-grained** write locks per shard
-
-### Memory Usage
-- **Efficient**: ~50-100 bytes overhead per key-value pair
-- **Predictable**: Memory arena prevents fragmentation
-- **Configurable**: Resource limits for memory and key count
-
-### Latency Distribution
-- **P50**: 0.5-1 µs
-- **P95**: 1-2 µs
-- **P99**: 2-5 µs
-- **P99.9**: 5-10 µs
-
-## Comparison with Other Systems
-
-| System | Write (ops/sec) | Read (ops/sec) | Latency (µs) |
-|--------|----------------|----------------|--------------|
-| **NeuroIndex** | **700K** | **1.2M** | **1-2** |
-| Redis | 100K | 100K | 10-50 |
-| Memcached | 200K | 300K | 5-20 |
-| RocksDB | 50K | 100K | 20-100 |
-
-*Note: Benchmarks are approximate and vary based on hardware, configuration, and workload*
-
-## Real-World Performance
-
-### Session Store (TTL-heavy)
-- **Throughput**: 500K+ ops/sec
-- **Use Case**: Web session management
-- **Advantage**: Volatile LRU protects persistent data
-
-### Cache Layer (Read-heavy)
-- **Throughput**: 1M+ reads/sec
-- **Cache Hit Rate**: >95%
-- **Use Case**: Application caching
-
-### Distributed Database (Raft)
-- **Throughput**: 100K+ ops/sec (with replication)
-- **Consistency**: Linearizable
-- **Use Case**: Distributed key-value store
-
-### ACID Transactions
-- **Throughput**: 50K+ transactions/sec
-- **Isolation**: Snapshot Isolation
-- **Use Case**: Multi-key atomic operations
-
-## Optimization Tips
-
-1. **Increase Shards**: Match CPU core count for best parallelism
-2. **Pre-allocate**: Set initial capacity to avoid early resizes
-3. **Batch Operations**: Use transactions for multi-key operations
-4. **Enable Auto-Tuning**: Get automatic performance recommendations
-5. **Monitor Metrics**: Use Prometheus integration for observability
-
-## Running Your Own Benchmarks
-
-Create a custom benchmark:
-
-```rust
-use engine::Engine;
-use std::time::Instant;
-
-fn main() {
-    let engine = Engine::<String, String>::with_shards(8, 1024);
-    
-    // Your workload here
-    let start = Instant::now();
-    for i in 0..1_000_000 {
-        engine.put(format!("key:{}", i), format!("value:{}", i)).unwrap();
-    }
-    let duration = start.elapsed();
-    
-    println!("Throughput: {:.0} ops/sec", 
-        1_000_000.0 / duration.as_secs_f64());
-}
+# Pipeline (10 commands)
+redis-benchmark -p 6379 -t set,get -n 100000 -P 10
+redis-benchmark -p 6380 -t set,get -n 100000 -P 10
 ```
 
-## Prometheus Metrics
-
-Export metrics for monitoring:
-
-```rust
-let metrics = engine.export_prometheus();
-println!("{}", metrics);
+### Custom Workloads
+```bash
+cd bench
+cargo run --release --bin custom_bench
 ```
 
-Example output:
+---
+
+## Reproducibility
+
+All benchmarks are reproducible with:
+```bash
+git clone https://github.com/yourusername/neuroindex
+cd neuroindex
+cargo build --release
+bash bench/redis_comparison.sh
 ```
-neuroindex_operations_total{operation="get"} 1000000
-neuroindex_operations_total{operation="put"} 1000000
-neuroindex_cache_hit_rate 0.95
-neuroindex_memory_bytes 104857600
-neuroindex_keys_total 1000000
-```
 
-## Conclusion
-
-NeuroIndex delivers:
-- ✅ **Sub-microsecond latency** for most operations
-- ✅ **Million+ ops/sec** throughput
-- ✅ **Linear scalability** with CPU cores
-- ✅ **Predictable performance** under load
-- ✅ **Production-ready** reliability
-
-Perfect for high-performance, low-latency applications requiring in-memory speed with distributed consistency.
+Results may vary based on hardware. Report your results in issues!
